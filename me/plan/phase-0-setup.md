@@ -550,16 +550,16 @@ gh repo edit BaiGanio/PortfolioLens --visibility public --accept-visibility-chan
 
 ## Done when
 
-- [ ] `dotnet build` shows 0 warnings and 0 errors.
-- [ ] `dotnet test` shows `total: 1`, `succeeded: 1`.
-- [ ] `src/PortfolioLens.Core/PortfolioLens.Core.csproj` has no reference of any type.
-- [ ] No `.csproj` in `src/` or `tests/` has a `Version=` attribute.
-- [ ] CI is green on `main` of the new repo.
-- [ ] `git status` does not show `me/private/` or `scan-input/`.
-- [ ] `scan-input/` has a minimum of 5 repos.
-- [ ] `docs/adr/` has 3 ADRs.
-- [ ] `fixtures/` has 2 folders and is not in `PortfolioLens.slnx`.
-- [ ] The new repo has a clean history. The repo is public.
+- [x] `dotnet build` shows 0 warnings and 0 errors.
+- [x] `dotnet test` shows `total: 1`, `succeeded: 1`.
+- [x] `src/PortfolioLens.Core/PortfolioLens.Core.csproj` has no reference of any type.
+- [x] No `.csproj` in `src/` or `tests/` has a `Version=` attribute.
+- [x] CI is green on `main` of the new repo.
+- [x] `git status` does not show `me/private/` or `scan-input/`.
+- [x] `scan-input/` has a minimum of 5 repos.
+- [x] `docs/adr/` has 3 ADRs.
+- [x] `fixtures/` has 2 folders and is not in `PortfolioLens.slnx`.
+- [x] The new repo has a clean history. The repo is public.
 
 ## Hints
 

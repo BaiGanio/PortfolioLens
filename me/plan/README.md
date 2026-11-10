@@ -117,7 +117,7 @@ I use the default if you say nothing.
 
 ## Progress
 
-- [ ] Phase 0 — Setup
+- [x] Phase 0 — Setup
 - [ ] Phase 1 — Extractor
 - [ ] Phase 2 — Storage + API
 - [ ] Phase 3 — Roslyn + rules
