@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PortfolioLens.Cli/PortfolioLens.Cli.csproj" />
+    <Project Path="src/PortfolioLens.Core/PortfolioLens.Core.csproj" />
+    <Project Path="src/PortfolioLens.Extraction/PortfolioLens.Extraction.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PortfolioLens.UnitTests/PortfolioLens.UnitTests.csproj" />
+  </Folder>
+</Solution>

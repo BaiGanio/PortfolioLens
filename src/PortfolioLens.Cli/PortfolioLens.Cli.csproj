@@ -1,0 +1,12 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\PortfolioLens.Core\PortfolioLens.Core.csproj" />
+    <ProjectReference Include="..\PortfolioLens.Extraction\PortfolioLens.Extraction.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+</Project>
