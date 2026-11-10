@@ -14,4 +14,8 @@
     <ProjectReference Include="..\..\src\PortfolioLens.Core\PortfolioLens.Core.csproj" />
     <ProjectReference Include="..\..\src\PortfolioLens.Extraction\PortfolioLens.Extraction.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\fixtures\**" LinkBase="fixtures" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
