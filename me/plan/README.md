@@ -47,6 +47,11 @@ After a phase with real challenges, I add a block "Challenges — Phase N" to th
 | `CLAUDE.md` | Committed (public) |
 | Repo visibility | Public at the end of Phase 0 |
 | Git flow | One branch + one pull request per phase |
+| What is one App | One repo folder = one App. Solutions are a list inside it |
+| Read `.csproj` | Plain XML. Limits go in an ADR |
+| VB.NET / F# | Project files: yes. Roslyn rules: C# first |
+| CLI arguments | `System.CommandLine` |
+| Snapshot tests | Own small helper. Not Verify (version 33 needs a licence declaration with an end date) |
 
 Tools found on your Mac: .NET SDK 10.0.403, Docker 29.8.2, Azure CLI.
 
@@ -87,14 +92,11 @@ Rule: `Core` references nothing. Everything else points inward to `Core`.
 
 I use the default if you say nothing.
 
-1. **What is one "App"?** A repo can have many `.sln` files.
-   → **One repo = one App.** Solutions are stored as a property. Simple and good enough.
-2. **How do we read `.csproj`?** Plain XML is fast and needs no build. MSBuild evaluation is exact but slow and breaks on old projects.
-   → **Plain XML**, plus manual support for `Directory.Packages.props` and `Directory.Build.props`. Write the limits in an ADR.
+1. ~~What is one "App"?~~ Answered 2026-11-10: one repo = one App. See the decisions table.
+2. ~~How do we read `.csproj`?~~ Answered 2026-11-10: plain XML. See the decisions table.
 3. **Do we keep history?** Overwrite on each scan, or keep what changed?
    → **Current state + `FirstSeenRunId` / `LastSeenRunId` on findings.** You can then show "fixed since last scan". Cheap to build.
-4. **VB.NET and F# projects?** Dnn.Platform and old enterprise code have `.vbproj`.
-   → **Project files: yes** (same XML). **Roslyn rules: C# first**, VB later only if time.
+4. ~~VB.NET and F# projects?~~ Default used 2026-11-10: project files yes, Roslyn rules C# first.
 5. **UI?** → **No UI.** API + one generated HTML/Markdown report per app. UI costs days and it is not the goal of this project.
 6. **k3s homelab is a Raspberry Pi 5 (ARM64)?** SQL Server has no ARM64 Linux image.
    → **Phase 6: app in k3s, SQL Server outside** (on the Mac or an x86 box). Second option: add PostgreSQL as a second EF provider. That is more work, but it is a real "support matrix" story. Decide when you reach Phase 6.
@@ -111,7 +113,7 @@ I use the default if you say nothing.
 - **Support dates from data, not from code.** Use Microsoft's `releases-index.json`. Keep a copy in the repo for offline use (on-prem story).
 - **Readiness score per app (Phase 3).** One number 0–100 from the findings. Managers want one number.
 - **Same repo, two ages.** Scan nopCommerce 3.90 (.NET Framework) and 4.90 (modern). Your demo shows the "before and after".
-- **Snapshot tests** (Verify library) for extractor JSON. Small effort, big safety.
+- **Snapshot tests** for extractor JSON. Small effort, big safety. (Phase 1 uses an own helper, not the Verify library.)
 - **Zip safety (Phase 4).** Zip bomb and "zip slip" path checks.
 - **Budget alert in Azure** before the first deploy. €10 limit.
 
