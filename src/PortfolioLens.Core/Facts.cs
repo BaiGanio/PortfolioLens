@@ -3,7 +3,7 @@ namespace PortfolioLens.Core.Facts;
 public enum ScanErrorKind { InvalidXml, Unresolved, Io, Unexpected }
 public enum PackageSource { PackageReference, CentralPackage, PackagesConfig }
 public enum ProjectStyle { Sdk, Legacy }
-public enum ProjectLanguage { CSharp, VisualBAsic, FSharp }
+public enum ProjectLanguage { CSharp, VisualBasic, FSharp }
 
 public sealed record ScanError(string Path, ScanErrorKind Kind, string Message);
 public sealed record AssemblyRef(string Name, string? HintPath);

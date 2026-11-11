@@ -373,85 +373,130 @@ Symlinks are skipped, so a link to a parent folder cannot cause a loop.
 
 Why: the 2 formats differ in 3 places: namespace, style marker, and framework property. Solve these first, with no packages and no other files.
 
+**Reworked 2026-11-11.** Each code block now says which file it goes in. I built this exact step in a scratch copy (SDK 10.0.403): 0 warnings, 0 errors, 6 tests green. I also built it with the 2 "you write" methods as stubs: 0 warnings.
+
+**The files of this step.** All in `src/PortfolioLens.Extraction/`, except the test file.
+
+| Sub-step | File | New or change | Who writes the logic |
+|---|---|---|---|
+| 5a | `PortfolioLens.Extraction.csproj` + `Directory.Packages.props` | change | the `dotnet` command |
+| 5b | `MsBuildFile.cs` | new | copy from here |
+| 5c | `FrameworkName.cs` | new | copy from here |
+| 5d | `PathText.cs` | new | copy from here |
+| 5e | `ProjectReadResult.cs` | new | copy from here |
+| 5f | `ProjectFileReader.cs` | new | frame from here, **2 methods you write** |
+| 5g | `PortfolioLens.Extraction.csproj` | change | copy from here |
+| 5h | `tests/PortfolioLens.UnitTests/ProjectFileReaderTests.cs` | new | copy from here |
+
+How the files work together:
+
+```mermaid
+flowchart LR
+    T[ProjectFileReaderTests] --> R[ProjectFileReader.ReadAsync]
+    R --> M[MsBuildFile.LoadAsync<br/>XML + properties]
+    R --> F[FrameworkName<br/>v4.7.2 → net472]
+    R --> P[PathText.Relative<br/>full path → src/A.csproj]
+    R --> O[ProjectReadResult<br/>ProjectFacts + errors]
+```
+
+**Before you start:** `src/PortfolioLens.Core/Facts.cs` has `VisualBAsic` (capital A). Change it to `VisualBasic`. The reader and the tests below use `VisualBasic`.
+
+#### 5a. Add the package
+
+Why: `NuGet.Frameworks` knows all framework names. We do not write that table ourselves.
+
 ```bash
 dotnet add src/PortfolioLens.Extraction package NuGet.Frameworks --version 7.9.0
 ```
 
-With Central Package Management, this command puts the version in `Directory.Packages.props` and a line with no version in the `.csproj`. I tested it. Check both files.
+With Central Package Management, this command puts the version in `Directory.Packages.props` and a line with no version in the `.csproj`. Check both files.
 
-**Idea 1 — load, and take the namespace from the root.** Make an internal class `MsBuildFile`. You use it for `.csproj` and for the props files.
+(Status 2026-11-11: you did this already. Both files are correct.)
 
-```csharp
-public static async Task<MsBuildFile> LoadAsync(string path, CancellationToken ct)
-{
-    await using var stream = new FileStream(
-        path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true);
-    var doc = await XDocument.LoadAsync(stream, LoadOptions.None, ct);
-    var root = doc.Root!;
-    return new MsBuildFile(root, ReadProperties(root));
-}
+#### 5b. `MsBuildFile.cs` — load the XML and read the properties
 
-public XNamespace Ns => Root.Name.Namespace;   // empty for SDK-style, the 2003 one for legacy
-```
+Why: one loader for `.csproj`, `.vbproj`, `.fsproj`, and (in step 7) the props files.
 
-- **Trap (the classic one):** `root.Elements("PropertyGroup")` gives nothing on a legacy file. The legacy file has `xmlns="http://schemas.microsoft.com/developer/msbuild/2003"`. Each element name includes it. Always write `root.Elements(Ns + "PropertyGroup")`. With an empty namespace, the same line works for SDK-style.
-- `useAsync: true` makes the file read really asynchronous. Without it, `LoadAsync` blocks a thread.
-
-**Idea 2 — read the properties, and do not evaluate conditions.**
+New file `src/PortfolioLens.Extraction/MsBuildFile.cs`:
 
 ```csharp
-// Unconditional value: the last one wins, as in MSBuild.
-// Conditional value: we do not evaluate it. We use it only if there is no other value.
-private static Dictionary<string, string> ReadProperties(XElement root)
-{
-    var ns = root.Name.Namespace;
-    var sure = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-    var maybe = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+using System.Xml.Linq;
 
-    foreach (var group in root.Elements(ns + "PropertyGroup"))
+namespace PortfolioLens.Extraction;
+
+// One loaded MSBuild file: a .csproj, .vbproj, .fsproj, or a props file.
+internal sealed class MsBuildFile(XElement root, IReadOnlyDictionary<string, string> properties)
+{
+    public XElement Root { get; } = root;
+
+    public IReadOnlyDictionary<string, string> Properties { get; } = properties;
+
+    // Empty for SDK-style. "http://schemas.microsoft.com/developer/msbuild/2003" for legacy.
+    public XNamespace Ns => Root.Name.Namespace;
+
+    public static async Task<MsBuildFile> LoadAsync(string path, CancellationToken ct)
     {
-        var groupHasCondition = group.Attribute("Condition") is not null;
-        foreach (var property in group.Elements())
+        await using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true);
+        var doc = await XDocument.LoadAsync(stream, LoadOptions.None, ct);
+        var root = doc.Root!;
+        return new MsBuildFile(root, ReadProperties(root));
+    }
+
+    // Unconditional value: the last one wins, as in MSBuild.
+    // Conditional value: we do not evaluate it. We use it only if there is no other value.
+    private static Dictionary<string, string> ReadProperties(XElement root)
+    {
+        var ns = root.Name.Namespace;
+        var sure = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var maybe = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var group in root.Elements(ns + "PropertyGroup"))
         {
-            var conditional = groupHasCondition || property.Attribute("Condition") is not null;
-            if (conditional)
+            var groupHasCondition = group.Attribute("Condition") is not null;
+            foreach (var property in group.Elements())
             {
-                maybe.TryAdd(property.Name.LocalName, property.Value.Trim());
-            }
-            else
-            {
-                sure[property.Name.LocalName] = property.Value.Trim();
+                var conditional = groupHasCondition || property.Attribute("Condition") is not null;
+                if (conditional)
+                {
+                    maybe.TryAdd(property.Name.LocalName, property.Value.Trim());
+                }
+                else
+                {
+                    sure[property.Name.LocalName] = property.Value.Trim();
+                }
             }
         }
-    }
 
-    foreach (var (name, value) in maybe)
-    {
-        sure.TryAdd(name, value);
-    }
+        foreach (var (name, value) in maybe)
+        {
+            sure.TryAdd(name, value);
+        }
 
-    return sure;
+        return sure;
+    }
 }
 ```
 
-Why this rule: a legacy file has many groups such as `Condition="'$(Configuration)' == 'Debug'"`. To evaluate them we need a full MSBuild. Our rule is simple, and it is correct for the 3 framework properties in all 6 cloned repos.
+| Part | Reason |
+|---|---|
+| `internal` | Only this project uses it. The tests see it through 5g |
+| `Ns` from the root | **Trap (the classic one):** `root.Elements("PropertyGroup")` gives nothing on a legacy file. The legacy file has `xmlns="http://schemas.microsoft.com/developer/msbuild/2003"`, and each element name includes it. Always write `root.Elements(Ns + "PropertyGroup")`. With an empty namespace, the same line works for SDK-style |
+| `useAsync: true` | Makes the file read really asynchronous. Without it, `LoadAsync` blocks a thread |
+| `OrdinalIgnoreCase` | MSBuild property names do not care about case |
+| `sure` / `maybe` | A legacy file has many groups such as `Condition="'$(Configuration)' == 'Debug'"`. To evaluate them we need a full MSBuild. Our rule is simple, and it is correct for the 3 framework properties in all 6 cloned repos |
+| `Properties` is public | Step 7 merges the properties of 3 files. It needs this |
 
-**Idea 3 — the style.** You write this one. SDK-style has one of these 3 shapes:
+#### 5c. `FrameworkName.cs` — one form for all framework names
 
-```xml
-<Project Sdk="Microsoft.NET.Sdk.Web">             <!-- attribute on the root -->
-<Project><Sdk Name="Microsoft.NET.Sdk" /> ...     <!-- Sdk element -->
-<Project><Import Sdk="Microsoft.NET.Sdk" ... />   <!-- Import with Sdk -->
-```
+Why: `v4.7.2`, `net472`, and `NET472` are the same thing. The output must show one form.
 
-No `Sdk` in any of the 3 places → `Legacy`. Store the text you found in `ProjectFacts.Sdk`.
-
-- Real data: `eShop` has `Sdk="Aspire.AppHost.Sdk/13.6.0"`. The value can have a version after `/`. Store it as it is.
-
-**Idea 4 — one form for all framework names.**
+New file `src/PortfolioLens.Extraction/FrameworkName.cs`:
 
 ```csharp
 using NuGet.Frameworks;
+
+namespace PortfolioLens.Extraction;
 
 internal static class FrameworkName
 {
@@ -473,35 +518,273 @@ internal static class FrameworkName
 }
 ```
 
-- `NuGetFramework.Parse` does not throw for text it does not know. It returns a framework with `IsUnsupported == true`. So we return null and the caller keeps the raw text.
-- Lookup order, you write it: `TargetFrameworks` (split on `;`) → `TargetFramework` → `TargetFrameworkVersion`. None found → a `ScanError` of kind `Unresolved` with the message `No target framework found`.
+- `NuGetFramework.Parse` does not throw for text it does not know. It returns a framework with `IsUnsupported == true`. So we return null, and the caller keeps the raw text.
+
+#### 5d. `PathText.cs` — paths with `/`
+
+Why: `ProjectFacts.Path` must be relative to the app root, with `/`. Then the output is the same on Windows and on the Mac.
+
+New file `src/PortfolioLens.Extraction/PathText.cs`:
+
+```csharp
+namespace PortfolioLens.Extraction;
+
+internal static class PathText
+{
+    // Always '/', on each OS. The output must be the same on Windows and on a Mac.
+    public static string Relative(string appRoot, string fullPath) =>
+        Path.GetRelativePath(appRoot, fullPath).Replace('\\', '/');
+}
+```
+
+Step 6 adds a second method to this file.
+
+#### 5e. `ProjectReadResult.cs` — what the reader gives back
+
+Why: a read can give a project **and** errors (for example: no framework found). Or only an error (broken XML). One return type holds both.
+
+New file `src/PortfolioLens.Extraction/ProjectReadResult.cs`:
+
+```csharp
+using PortfolioLens.Core.Facts;
+
+namespace PortfolioLens.Extraction;
+
+// Project is null when the file cannot be read (broken XML). Errors can have items in both cases.
+internal sealed record ProjectReadResult(ProjectFacts? Project, IReadOnlyList<ScanError> Errors);
+```
+
+#### 5f. `ProjectFileReader.cs` — put it all together
+
+Why: this is the one class that turns a file path into `ProjectFacts`. Step 8 calls it from N workers.
+
+New file `src/PortfolioLens.Extraction/ProjectFileReader.cs`. Copy the frame. Then write the 2 methods at the bottom (`FindSdk` and `ReadFrameworks`). The rules for them are below the code.
+
+```csharp
+using System.Xml;
+using System.Xml.Linq;
+using PortfolioLens.Core.Facts;
+
+namespace PortfolioLens.Extraction;
+
+// Reads the facts of one project file. One instance per app.
+internal sealed class ProjectFileReader(string appRoot)
+{
+    public async Task<ProjectReadResult> ReadAsync(string projectPath, CancellationToken ct)
+    {
+        var relativePath = PathText.Relative(appRoot, projectPath);
+
+        MsBuildFile file;
+        try
+        {
+            file = await MsBuildFile.LoadAsync(projectPath, ct);
+        }
+        catch (XmlException ex)
+        {
+            var error = new ScanError(relativePath, ScanErrorKind.InvalidXml, ex.Message);
+            return new ProjectReadResult(null, [error]);
+        }
+
+        var errors = new List<ScanError>();
+
+        var sdk = FindSdk(file.Root, file.Ns);
+        var frameworks = ReadFrameworks(file.Properties);
+        if (frameworks.Count == 0)
+        {
+            errors.Add(new ScanError(relativePath, ScanErrorKind.Unresolved, "No target framework found"));
+        }
+
+        var project = new ProjectFacts(
+            Path: relativePath,
+            Language: LanguageOf(projectPath),
+            Style: sdk is null ? ProjectStyle.Legacy : ProjectStyle.Sdk,
+            Sdk: sdk,
+            OutputType: file.Properties.GetValueOrDefault("OutputType"),
+            TargetFrameworks: frameworks,
+            Packages: [],            // step 6
+            ProjectReferences: [],   // step 6
+            AssemblyReferences: []); // step 6
+
+        return new ProjectReadResult(project, errors);
+    }
+
+    private static ProjectLanguage LanguageOf(string projectPath)
+    {
+        var extension = Path.GetExtension(projectPath);
+        if (extension.Equals(".vbproj", StringComparison.OrdinalIgnoreCase))
+        {
+            return ProjectLanguage.VisualBasic;
+        }
+
+        if (extension.Equals(".fsproj", StringComparison.OrdinalIgnoreCase))
+        {
+            return ProjectLanguage.FSharp;
+        }
+
+        return ProjectLanguage.CSharp;
+    }
+
+    // YOU WRITE THIS. Rules: see "FindSdk" below.
+    private static string? FindSdk(XElement root, XNamespace ns)
+    {
+        throw new NotImplementedException();
+    }
+
+    // YOU WRITE THIS. Rules: see "ReadFrameworks" below.
+    private static List<string> ReadFrameworks(IReadOnlyDictionary<string, string> properties)
+    {
+        throw new NotImplementedException();
+    }
+}
+```
+
+| Part | Reason |
+|---|---|
+| `appRoot` in the constructor | Each path in the output is relative to it. Step 7 adds a second parameter (`DirectoryProps`) |
+| Catch `XmlException` only | Broken XML is a normal case, so it becomes a `ScanError`. Each other exception goes up. The pipeline catches it in step 8 |
+| `Packages: []` etc. | Step 6 fills these. Empty lists now, so the code builds |
+| `sdk is null` → `Legacy` | The style comes from the SDK marker. One fact, not two checks |
+
+**`FindSdk` — you write it.** SDK-style has one of these 3 shapes:
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk.Web">             <!-- 1. attribute on the root -->
+<Project><Sdk Name="Microsoft.NET.Sdk" /> ...     <!-- 2. Sdk element, attribute Name -->
+<Project><Import Sdk="Microsoft.NET.Sdk" ... />   <!-- 3. Import element, attribute Sdk -->
+```
+
+- Look in this order: 1, 2, 3. Return the first text you find. Trim it.
+- No `Sdk` in any of the 3 places → return `null`. The frame then sets `Legacy`.
+- Use `ns + "Sdk"` and `ns + "Import"` for the element names (the namespace trap from 5b).
+- Real data: `eShop` has `Sdk="Aspire.AppHost.Sdk/13.6.0"`. The value can have a version after `/`. Return it as it is.
+
+**`ReadFrameworks` — you write it.**
+
+- Lookup order: `TargetFrameworks` (split on `;`) → `TargetFramework` → `TargetFrameworkVersion`. Take the first one that has a value. Do not merge them.
+- For `TargetFrameworks` and `TargetFramework`: use `FrameworkName.FromMoniker`. For `TargetFrameworkVersion`: use `FrameworkName.FromLegacyVersion`.
+- The helper returns `null` → keep the raw text (`?? raw`). Step 7 needs this for `$(NetVersion)`.
 - Sort the list with `StringComparer.Ordinal`.
+- None found → return an empty list. The frame then adds the `No target framework found` error.
 - **Trap:** `TargetFrameworks` can have spaces and an empty part: `net10.0; net472;`. Use `StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries`.
 - We ignore `TargetFrameworkProfile` (`Client`). Write it in ADR 0004.
 
-**The reader.** Make an internal `ProjectFileReader`. Its method returns the project **and** the errors:
+#### 5g. Let the tests see `internal` types
 
-```csharp
-public sealed record ProjectReadResult(ProjectFacts? Project, IReadOnlyList<ScanError> Errors);
-```
+Why: the reader is `internal`. The public door (`AppScanner`) comes in step 8. Until then, the test project needs access.
 
-Broken XML: catch `XmlException` around `MsBuildFile.LoadAsync`, and return `new ProjectReadResult(null, [error])`. Catch this one type only. The pipeline catches the rest in step 8.
-
-Language: from the extension. `.vbproj` → `VisualBasic`, `.fsproj` → `FSharp`, else `CSharp`.
-
-How to test now: the reader is `internal`. Test through the public door when it exists (step 8). For now, add this to `PortfolioLens.Extraction.csproj` so the tests can see internal types:
+Change `src/PortfolioLens.Extraction/PortfolioLens.Extraction.csproj`. The full file after the change:
 
 ```xml
-<ItemGroup>
-  <InternalsVisibleTo Include="PortfolioLens.UnitTests" />
-</ItemGroup>
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\PortfolioLens.Core\PortfolioLens.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NuGet.Frameworks" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="PortfolioLens.UnitTests" />
+  </ItemGroup>
+
+</Project>
 ```
 
-⚠ I did not compile the `InternalsVisibleTo` line. My copy tests through the public `AppScanner` only.
+- The value is the **assembly name** of the test project. It is the same as the project name here.
 
-Tests for this step: `sdk-style-net10` → `Sdk`, `["net10.0"]`. `old-style-net472` → `Legacy`, `["net472"]`. `multi-target` → 3 frameworks. `vbproj-legacy` → `VisualBasic`, `["net40"]`. `broken-xml` → `Broken.csproj` gives an `InvalidXml` error.
+#### 5h. The tests
 
-- **Trap in tests:** xUnit v3 has an analyzer that wants a token on async calls. Pass `TestContext.Current.CancellationToken`.
+Why: 5 fixtures, 5 facts. Each test reads one file and checks one idea.
+
+New file `tests/PortfolioLens.UnitTests/ProjectFileReaderTests.cs`:
+
+```csharp
+using PortfolioLens.Core.Facts;
+using PortfolioLens.Extraction;
+
+namespace PortfolioLens.UnitTests;
+
+public class ProjectFileReaderTests
+{
+    // Reads one project file of one fixture. The fixture folder is the app root.
+    private static Task<ProjectReadResult> Read(string fixture, string file)
+    {
+        var appRoot = Path.Combine(AppContext.BaseDirectory, "fixtures", fixture);
+        var reader = new ProjectFileReader(appRoot);
+        return reader.ReadAsync(Path.Combine(appRoot, file), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Sdk_style_project_has_sdk_and_net10()
+    {
+        var result = await Read("sdk-style-net10", "SdkStyle.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(ProjectStyle.Sdk, project.Style);
+        Assert.Equal(["net10.0"], project.TargetFrameworks);
+        Assert.Empty(result.Errors);
+    }
+
+    [Fact]
+    public async Task Legacy_project_gets_short_framework_name()
+    {
+        var result = await Read("old-style-net472", "OldStyle.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(ProjectStyle.Legacy, project.Style);
+        Assert.Null(project.Sdk);
+        Assert.Equal(["net472"], project.TargetFrameworks);
+    }
+
+    [Fact]
+    public async Task Multi_target_project_has_three_sorted_frameworks()
+    {
+        var result = await Read("multi-target", "MultiTarget.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(["net10.0", "net472", "netstandard2.0"], project.TargetFrameworks);
+    }
+
+    [Fact]
+    public async Task Vb_project_is_visual_basic_on_net40()
+    {
+        var result = await Read("vbproj-legacy", "OldVb.vbproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(ProjectLanguage.VisualBasic, project.Language);
+        Assert.Equal(["net40"], project.TargetFrameworks);
+    }
+
+    [Fact]
+    public async Task Broken_xml_gives_an_error_and_no_project()
+    {
+        var result = await Read("broken-xml", "Broken.csproj");
+
+        Assert.Null(result.Project);
+        var error = Assert.Single(result.Errors);
+        Assert.Equal(ScanErrorKind.InvalidXml, error.Kind);
+        Assert.Equal("Broken.csproj", error.Path);
+    }
+}
+```
+
+| Part | Reason |
+|---|---|
+| `AppContext.BaseDirectory` + `"fixtures"` | The test `.csproj` copies `fixtures/` next to the test DLL (Phase 0). So the path works on each machine and in CI |
+| `Assert.IsType<ProjectFacts>(result.Project)` | It checks "not null" **and** gives you a non-null variable. No `!` needed |
+| `TestContext.Current.CancellationToken` | **Trap:** xUnit v3 has an analyzer that wants a token on async calls. Without it, the build fails (warnings are errors) |
+| Sorted `"net10.0", "net472", "netstandard2.0"` | That is the `Ordinal` order. `net4…` comes before `nets…` because `4` < `s` |
+
+#### 5i. Build, test, commit
+
+```bash
+dotnet build
+dotnet test
+```
+
+Expect: 0 warnings, 6 tests green (5 new + the smoke test). Before you write `FindSdk` and `ReadFrameworks`, 4 tests fail with `NotImplementedException`. That is normal. The broken-xml test is green from the start.
 
 Commit message:
 
@@ -535,14 +818,12 @@ Rules:
 5. `Reference`: the name is the text before the first comma of `Include`. `HintPath` is a child element. Replace `\` with `/` in it.
 6. Sort all 3 lists. Packages by id, then version, then condition.
 
-The path helper, because the Mac does not know `\`:
+The path helper, because the Mac does not know `\`. Add this second method to `src/PortfolioLens.Extraction/PathText.cs` (you made the file in 5d):
 
 ```csharp
 internal static class PathText
 {
-    // Always '/', on each OS. The output must be the same on Windows and on a Mac.
-    public static string Relative(string appRoot, string fullPath) =>
-        Path.GetRelativePath(appRoot, fullPath).Replace('\\', '/');
+    // Relative(...) from 5d stays here.
 
     // "..\Lib\Lib.csproj" in a project file -> "src/Lib/Lib.csproj" from the app root.
     public static string RelativeFromProject(string appRoot, string projectPath, string include)

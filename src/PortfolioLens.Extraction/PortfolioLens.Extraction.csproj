@@ -4,4 +4,8 @@
     <ProjectReference Include="..\PortfolioLens.Core\PortfolioLens.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="NuGet.Frameworks" />
+  </ItemGroup>
+
 </Project>
