@@ -4,6 +4,8 @@
 
 **Time:** 3–4 evenings.
 
+**Reworked:** 2026-11-11. Steps 5–11 now show each file in full, with its path. Each file comes from a scratch copy that I built and tested step by step (SDK 10.0.403): 0 warnings after each step; 6 → 10 → 13 → 16 → 24 tests green; the scan of the 6 repos gives the numbers in step 11.
+
 **Extended:** 2026-11-10. I wrote a full test copy of this phase in a temp folder, with SDK 10.0.403 and the same `Directory.Build.props`. Result: build 0 warnings, 0 errors; 11 tests green; scan of the 6 repos in `scan-input/` with no crash. Each code block below comes from that copy. I did **not** scan `dotnet/roslyn` (it is not cloned). I did **not** run the `git` and `gh` commands.
 
 ## The story
@@ -373,7 +375,7 @@ Symlinks are skipped, so a link to a parent folder cannot cause a loop.
 
 Why: the 2 formats differ in 3 places: namespace, style marker, and framework property. Solve these first, with no packages and no other files.
 
-**Reworked 2026-11-11.** Each code block now says which file it goes in. I built this exact step in a scratch copy (SDK 10.0.403): 0 warnings, 0 errors, 6 tests green. I also built it with the 2 "you write" methods as stubs: 0 warnings.
+**Reworked 2026-11-11.** Each code block now says which file it goes in. I built this exact step in a scratch copy (SDK 10.0.403): 0 warnings, 0 errors, 6 tests green. 
 
 **The files of this step.** All in `src/PortfolioLens.Extraction/`, except the test file.
 
@@ -384,7 +386,7 @@ Why: the 2 formats differ in 3 places: namespace, style marker, and framework pr
 | 5c | `FrameworkName.cs` | new | copy from here |
 | 5d | `PathText.cs` | new | copy from here |
 | 5e | `ProjectReadResult.cs` | new | copy from here |
-| 5f | `ProjectFileReader.cs` | new | frame from here, **2 methods you write** |
+| 5f | `ProjectFileReader.cs` | new | copy from here |
 | 5g | `PortfolioLens.Extraction.csproj` | change | copy from here |
 | 5h | `tests/PortfolioLens.UnitTests/ProjectFileReaderTests.cs` | new | copy from here |
 
@@ -558,7 +560,7 @@ internal sealed record ProjectReadResult(ProjectFacts? Project, IReadOnlyList<Sc
 
 Why: this is the one class that turns a file path into `ProjectFacts`. Step 8 calls it from N workers.
 
-New file `src/PortfolioLens.Extraction/ProjectFileReader.cs`. Copy the frame. Then write the 2 methods at the bottom (`FindSdk` and `ReadFrameworks`). The rules for them are below the code.
+New file `src/PortfolioLens.Extraction/ProjectFileReader.cs`. This is the full file. The rules for `FindSdk` and `ReadFrameworks` are below the code, so you know why each line is there.
 
 ```csharp
 using System.Xml;
@@ -624,16 +626,56 @@ internal sealed class ProjectFileReader(string appRoot)
         return ProjectLanguage.CSharp;
     }
 
-    // YOU WRITE THIS. Rules: see "FindSdk" below.
+    // SDK-style has the Sdk text in 1 of 3 places. Legacy has none -> null.
     private static string? FindSdk(XElement root, XNamespace ns)
     {
-        throw new NotImplementedException();
+        // 1. <Project Sdk="Microsoft.NET.Sdk.Web">
+        var fromRoot = root.Attribute("Sdk")?.Value;
+        if (!string.IsNullOrWhiteSpace(fromRoot))
+        {
+            return fromRoot.Trim();
+        }
+
+        // 2. <Project><Sdk Name="Microsoft.NET.Sdk" />
+        var fromSdkElement = root.Elements(ns + "Sdk")
+            .Select(sdk => sdk.Attribute("Name")?.Value)
+            .FirstOrDefault(name => !string.IsNullOrWhiteSpace(name));
+        if (fromSdkElement is not null)
+        {
+            return fromSdkElement.Trim();
+        }
+
+        // 3. <Project><Import Sdk="Microsoft.NET.Sdk" Project="Sdk.props" />
+        var fromImport = root.Elements(ns + "Import")
+            .Select(import => import.Attribute("Sdk")?.Value)
+            .FirstOrDefault(sdk => !string.IsNullOrWhiteSpace(sdk));
+        return fromImport?.Trim();
     }
 
-    // YOU WRITE THIS. Rules: see "ReadFrameworks" below.
+    // Lookup order: TargetFrameworks -> TargetFramework -> TargetFrameworkVersion.
+    // The first one with a value wins. Unknown text stays as raw text (step 7 needs this).
     private static List<string> ReadFrameworks(IReadOnlyDictionary<string, string> properties)
     {
-        throw new NotImplementedException();
+        if (properties.TryGetValue("TargetFrameworks", out var many) && !string.IsNullOrWhiteSpace(many))
+        {
+            return [.. many
+                .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(moniker => FrameworkName.FromMoniker(moniker) ?? moniker)
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)];
+        }
+
+        if (properties.TryGetValue("TargetFramework", out var one) && !string.IsNullOrWhiteSpace(one))
+        {
+            return [FrameworkName.FromMoniker(one) ?? one.Trim()];
+        }
+
+        if (properties.TryGetValue("TargetFrameworkVersion", out var legacy) && !string.IsNullOrWhiteSpace(legacy))
+        {
+            return [FrameworkName.FromLegacyVersion(legacy) ?? legacy.Trim()];
+        }
+
+        return [];
     }
 }
 ```
@@ -645,7 +687,7 @@ internal sealed class ProjectFileReader(string appRoot)
 | `Packages: []` etc. | Step 6 fills these. Empty lists now, so the code builds |
 | `sdk is null` → `Legacy` | The style comes from the SDK marker. One fact, not two checks |
 
-**`FindSdk` — you write it.** SDK-style has one of these 3 shapes:
+**`FindSdk` — the rules.** SDK-style has one of these 3 shapes:
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk.Web">             <!-- 1. attribute on the root -->
@@ -658,12 +700,12 @@ internal sealed class ProjectFileReader(string appRoot)
 - Use `ns + "Sdk"` and `ns + "Import"` for the element names (the namespace trap from 5b).
 - Real data: `eShop` has `Sdk="Aspire.AppHost.Sdk/13.6.0"`. The value can have a version after `/`. Return it as it is.
 
-**`ReadFrameworks` — you write it.**
+**`ReadFrameworks` — the rules.**
 
 - Lookup order: `TargetFrameworks` (split on `;`) → `TargetFramework` → `TargetFrameworkVersion`. Take the first one that has a value. Do not merge them.
 - For `TargetFrameworks` and `TargetFramework`: use `FrameworkName.FromMoniker`. For `TargetFrameworkVersion`: use `FrameworkName.FromLegacyVersion`.
 - The helper returns `null` → keep the raw text (`?? raw`). Step 7 needs this for `$(NetVersion)`.
-- Sort the list with `StringComparer.Ordinal`.
+- Sort the list with `StringComparer.Ordinal`. `Distinct` removes a name that is in the list 2 times (`net472;NET472`).
 - None found → return an empty list. The frame then adds the `No target framework found` error.
 - **Trap:** `TargetFrameworks` can have spaces and an empty part: `net10.0; net472;`. Use `StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries`.
 - We ignore `TargetFrameworkProfile` (`Client`). Write it in ADR 0004.
@@ -784,7 +826,7 @@ dotnet build
 dotnet test
 ```
 
-Expect: 0 warnings, 6 tests green (5 new + the smoke test). Before you write `FindSdk` and `ReadFrameworks`, 4 tests fail with `NotImplementedException`. That is normal. The broken-xml test is green from the start.
+Expect: 0 warnings, 6 tests green (5 new + the smoke test).
 
 Commit message:
 
@@ -799,7 +841,17 @@ NuGet.Frameworks turns v4.7.2 and net472 into the same short name.
 
 Why: packages and references are the input for each risk rule in Phase 3.
 
-You write this step. The shapes you must handle:
+**Built and tested 2026-11-11** in the scratch copy: 0 warnings, 10 tests green.
+
+**The files of this step**
+
+| Sub-step | File | New or change |
+|---|---|---|
+| 6a | `src/PortfolioLens.Extraction/PathText.cs` | change: add 1 method |
+| 6b | `src/PortfolioLens.Extraction/ProjectFileReader.cs` | change: full file below |
+| 6c | `tests/PortfolioLens.UnitTests/ProjectFileReaderTests.cs` | change: full file below |
+
+**The shapes the reader must handle**
 
 ```xml
 <PackageReference Include="Serilog" Version="4.4.0" />             <!-- attribute -->
@@ -809,7 +861,7 @@ You write this step. The shapes you must handle:
 <PackageReference Update="Serilog" Version="4.4.0" />              <!-- skip: it changes, it does not add -->
 ```
 
-Rules:
+**The rules** (the code below follows them, in this order):
 
 1. Use `Root.Descendants(Ns + "PackageReference")`. Skip an item with no `Include`.
 2. Condition = the item's `Condition`, or else the `Condition` of the parent `ItemGroup`. Store the text.
@@ -818,12 +870,20 @@ Rules:
 5. `Reference`: the name is the text before the first comma of `Include`. `HintPath` is a child element. Replace `\` with `/` in it.
 6. Sort all 3 lists. Packages by id, then version, then condition.
 
-The path helper, because the Mac does not know `\`. Add this second method to `src/PortfolioLens.Extraction/PathText.cs` (you made the file in 5d):
+#### 6a. `PathText.cs` — add `RelativeFromProject`
+
+Why: a `ProjectReference` is relative to the **project** folder. The output must be relative to the **app root**.
+
+The full file after the change:
 
 ```csharp
+namespace PortfolioLens.Extraction;
+
 internal static class PathText
 {
-    // Relative(...) from 5d stays here.
+    // Always '/', on each OS. The output must be the same on Windows and on a Mac.
+    public static string Relative(string appRoot, string fullPath) =>
+        Path.GetRelativePath(appRoot, fullPath).Replace('\\', '/');
 
     // "..\Lib\Lib.csproj" in a project file -> "src/Lib/Lib.csproj" from the app root.
     public static string RelativeFromProject(string appRoot, string projectPath, string include)
@@ -835,11 +895,395 @@ internal static class PathText
 }
 ```
 
-- **Trap:** on the Mac, `Path.Combine("src/Lib", @"..\Other\Other.csproj")` treats `..\Other\Other.csproj` as one file name. Replace `\` first.
-- **Trap (real data):** `eShopModernizing/eShopModernizedNTier/src/eShopWinForms/` has 2 projects in one folder: an SDK-style one and a legacy `.fx.csproj`. They share one `packages.config`. Rule 3 gives the file to the legacy project only. That is why the rule says "only for Legacy".
-- Why rule 5 cuts at the comma: `Include` on a legacy reference looks like `Newtonsoft.Json, Version=13.0.0.0, Culture=neutral, PublicKeyToken=…`.
+- **Trap:** on the Mac, `Path.Combine("src/Lib", @"..\Other\Other.csproj")` treats `..\Other\Other.csproj` as one file name. Replace `\` first. That is why the method does `include.Replace('\\', '/')` before `Combine`.
 
-Tests: `old-style-net472` → 1 package from `PackagesConfig`, 2 assembly references, hint path with `/`. `multi-target` → the package has the condition text. `props-inherit` → project reference is `src/Other/Other.csproj`. `vbproj-legacy` → `System.ServiceModel`, `System.Web`.
+#### 6b. `ProjectFileReader.cs` — read packages and references
+
+Why: one class still reads one project. It now fills the 3 lists that were `[]` in step 5.
+
+The full file after the change. New compared to step 5: the `packages` lines in `ReadAsync`, and all methods from `ReadPackageReferences` down.
+
+```csharp
+using System.Xml;
+using System.Xml.Linq;
+using PortfolioLens.Core.Facts;
+
+namespace PortfolioLens.Extraction;
+
+// Reads the facts of one project file. One instance per app.
+internal sealed class ProjectFileReader(string appRoot)
+{
+    public async Task<ProjectReadResult> ReadAsync(string projectPath, CancellationToken ct)
+    {
+        var relativePath = PathText.Relative(appRoot, projectPath);
+
+        MsBuildFile file;
+        try
+        {
+            file = await MsBuildFile.LoadAsync(projectPath, ct);
+        }
+        catch (XmlException ex)
+        {
+            var error = new ScanError(relativePath, ScanErrorKind.InvalidXml, ex.Message);
+            return new ProjectReadResult(null, [error]);
+        }
+
+        var errors = new List<ScanError>();
+
+        var sdk = FindSdk(file.Root, file.Ns);
+        var style = sdk is null ? ProjectStyle.Legacy : ProjectStyle.Sdk;
+        var frameworks = ReadFrameworks(file.Properties);
+        if (frameworks.Count == 0)
+        {
+            errors.Add(new ScanError(relativePath, ScanErrorKind.Unresolved, "No target framework found"));
+        }
+
+        var packages = ReadPackageReferences(file);
+        if (style == ProjectStyle.Legacy)
+        {
+            packages.AddRange(await ReadPackagesConfigAsync(projectPath, errors, ct));
+        }
+
+        var project = new ProjectFacts(
+            Path: relativePath,
+            Language: LanguageOf(projectPath),
+            Style: style,
+            Sdk: sdk,
+            OutputType: file.Properties.GetValueOrDefault("OutputType"),
+            TargetFrameworks: frameworks,
+            Packages: SortPackages(packages),
+            ProjectReferences: ReadProjectReferences(file, projectPath),
+            AssemblyReferences: ReadAssemblyReferences(file));
+
+        return new ProjectReadResult(project, errors);
+    }
+
+    private static ProjectLanguage LanguageOf(string projectPath)
+    {
+        var extension = Path.GetExtension(projectPath);
+        if (extension.Equals(".vbproj", StringComparison.OrdinalIgnoreCase))
+        {
+            return ProjectLanguage.VisualBasic;
+        }
+
+        if (extension.Equals(".fsproj", StringComparison.OrdinalIgnoreCase))
+        {
+            return ProjectLanguage.FSharp;
+        }
+
+        return ProjectLanguage.CSharp;
+    }
+
+    // SDK-style has the Sdk text in 1 of 3 places. Legacy has none -> null.
+    private static string? FindSdk(XElement root, XNamespace ns)
+    {
+        // 1. <Project Sdk="Microsoft.NET.Sdk.Web">
+        var fromRoot = root.Attribute("Sdk")?.Value;
+        if (!string.IsNullOrWhiteSpace(fromRoot))
+        {
+            return fromRoot.Trim();
+        }
+
+        // 2. <Project><Sdk Name="Microsoft.NET.Sdk" />
+        var fromSdkElement = root.Elements(ns + "Sdk")
+            .Select(sdk => sdk.Attribute("Name")?.Value)
+            .FirstOrDefault(name => !string.IsNullOrWhiteSpace(name));
+        if (fromSdkElement is not null)
+        {
+            return fromSdkElement.Trim();
+        }
+
+        // 3. <Project><Import Sdk="Microsoft.NET.Sdk" Project="Sdk.props" />
+        var fromImport = root.Elements(ns + "Import")
+            .Select(import => import.Attribute("Sdk")?.Value)
+            .FirstOrDefault(sdk => !string.IsNullOrWhiteSpace(sdk));
+        return fromImport?.Trim();
+    }
+
+    // Lookup order: TargetFrameworks -> TargetFramework -> TargetFrameworkVersion.
+    // The first one with a value wins. Unknown text stays as raw text (step 7 needs this).
+    private static List<string> ReadFrameworks(IReadOnlyDictionary<string, string> properties)
+    {
+        if (properties.TryGetValue("TargetFrameworks", out var many) && !string.IsNullOrWhiteSpace(many))
+        {
+            return [.. many
+                .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(moniker => FrameworkName.FromMoniker(moniker) ?? moniker)
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)];
+        }
+
+        if (properties.TryGetValue("TargetFramework", out var one) && !string.IsNullOrWhiteSpace(one))
+        {
+            return [FrameworkName.FromMoniker(one) ?? one.Trim()];
+        }
+
+        if (properties.TryGetValue("TargetFrameworkVersion", out var legacy) && !string.IsNullOrWhiteSpace(legacy))
+        {
+            return [FrameworkName.FromLegacyVersion(legacy) ?? legacy.Trim()];
+        }
+
+        return [];
+    }
+
+    // <PackageReference Include="..." />. An item with Update and no Include changes an item. It does not add one.
+    private static List<PackageRef> ReadPackageReferences(MsBuildFile file)
+    {
+        var packages = new List<PackageRef>();
+        foreach (var item in file.Root.Descendants(file.Ns + "PackageReference"))
+        {
+            var id = item.Attribute("Include")?.Value.Trim();
+            if (string.IsNullOrEmpty(id))
+            {
+                continue;
+            }
+
+            var version = ValueOf(item, file.Ns, "VersionOverride") ?? ValueOf(item, file.Ns, "Version");
+            packages.Add(new PackageRef(id, version, PackageSource.PackageReference, ConditionOf(item)));
+        }
+
+        return packages;
+    }
+
+    // MSBuild accepts both forms: Version="1.0" and <Version>1.0</Version>.
+    private static string? ValueOf(XElement item, XNamespace ns, string name)
+    {
+        var value = item.Attribute(name)?.Value ?? item.Element(ns + name)?.Value;
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
+    // The condition of the item, or else the condition of its ItemGroup. Stored as text. Not evaluated.
+    private static string? ConditionOf(XElement item) =>
+        item.Attribute("Condition")?.Value ?? item.Parent?.Attribute("Condition")?.Value;
+
+    // packages.config is next to the legacy project. It has no XML namespace.
+    private async Task<List<PackageRef>> ReadPackagesConfigAsync(
+        string projectPath, List<ScanError> errors, CancellationToken ct)
+    {
+        var path = Path.Combine(Path.GetDirectoryName(projectPath)!, "packages.config");
+        if (!File.Exists(path))
+        {
+            return [];
+        }
+
+        XDocument doc;
+        try
+        {
+            await using var stream = new FileStream(
+                path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true);
+            doc = await XDocument.LoadAsync(stream, LoadOptions.None, ct);
+        }
+        catch (XmlException ex)
+        {
+            errors.Add(new ScanError(PathText.Relative(appRoot, path), ScanErrorKind.InvalidXml, ex.Message));
+            return [];
+        }
+
+        var packages = new List<PackageRef>();
+        foreach (var package in doc.Root!.Elements("package"))
+        {
+            var id = package.Attribute("id")?.Value.Trim();
+            if (!string.IsNullOrEmpty(id))
+            {
+                var version = package.Attribute("version")?.Value.Trim();
+                packages.Add(new PackageRef(id, version, PackageSource.PackagesConfig, null));
+            }
+        }
+
+        return packages;
+    }
+
+    // "..\Other\Other.csproj" -> "src/Other/Other.csproj" (relative to the app root, with '/').
+    private List<string> ReadProjectReferences(MsBuildFile file, string projectPath) =>
+    [
+        .. file.Root.Descendants(file.Ns + "ProjectReference")
+            .Select(item => item.Attribute("Include")?.Value.Trim())
+            .OfType<string>()
+            .Where(include => include.Length > 0)
+            .Select(include => PathText.RelativeFromProject(appRoot, projectPath, include))
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal),
+    ];
+
+    // <Reference Include="Newtonsoft.Json, Version=13.0.0.0, ..."> -> name "Newtonsoft.Json".
+    private static List<AssemblyRef> ReadAssemblyReferences(MsBuildFile file)
+    {
+        var references = new List<AssemblyRef>();
+        foreach (var item in file.Root.Descendants(file.Ns + "Reference"))
+        {
+            var include = item.Attribute("Include")?.Value;
+            if (string.IsNullOrWhiteSpace(include))
+            {
+                continue;
+            }
+
+            var name = include.Split(',')[0].Trim();
+            var hintPath = item.Element(file.Ns + "HintPath")?.Value.Trim().Replace('\\', '/');
+            references.Add(new AssemblyRef(name, hintPath));
+        }
+
+        return [.. references
+            .OrderBy(r => r.Name, StringComparer.Ordinal)
+            .ThenBy(r => r.HintPath, StringComparer.Ordinal)];
+    }
+
+    // Ordinal sort: the same order on each machine.
+    private static List<PackageRef> SortPackages(List<PackageRef> packages) =>
+    [
+        .. packages
+            .OrderBy(p => p.Id, StringComparer.Ordinal)
+            .ThenBy(p => p.Version, StringComparer.Ordinal)
+            .ThenBy(p => p.Condition, StringComparer.Ordinal),
+    ];
+}
+```
+
+| Part | Reason |
+|---|---|
+| `Descendants`, not `Elements` | An `ItemGroup` can be inside a `Choose`/`When` block. `Descendants` finds the items at each depth |
+| `VersionOverride ?? Version` | `VersionOverride` exists to win over the central version. So it also wins here |
+| `ValueOf` checks attribute **and** child element | Old projects write `<Version>4.4.0</Version>` as a child |
+| `ConditionOf` uses `item.Parent` | The condition is mostly on the `ItemGroup`, not on the item (see `multi-target`) |
+| `ReadPackagesConfigAsync` is not `static` | It uses `appRoot` (from the constructor) for the error path |
+| Catch `XmlException` for `packages.config` | A broken `packages.config` is 1 error. The project itself is still read |
+| `doc.Root!.Elements("package")` with no namespace | `packages.config` is NuGet XML, not MSBuild XML. It has no `xmlns` |
+| `Split(',')[0]` | `Include` on a legacy reference looks like `Newtonsoft.Json, Version=13.0.0.0, Culture=neutral, PublicKeyToken=…` |
+| `Distinct` on project references | The same reference in 2 `ItemGroup`s with 2 conditions is 1 fact |
+| `StringComparer.Ordinal` in each sort | The same order on each machine |
+
+- **Trap (real data):** `eShopModernizing/eShopModernizedNTier/src/eShopWinForms/` has 2 projects in one folder: an SDK-style one and a legacy `.fx.csproj`. They share one `packages.config`. Rule 3 gives the file to the legacy project only. That is why the code has `if (style == ProjectStyle.Legacy)`.
+
+#### 6c. The tests
+
+Why: 4 new tests, one for each new rule. The 5 tests from step 5 stay.
+
+The full file after the change:
+
+```csharp
+using PortfolioLens.Core.Facts;
+using PortfolioLens.Extraction;
+
+namespace PortfolioLens.UnitTests;
+
+public class ProjectFileReaderTests
+{
+    // Reads one project file of one fixture. The fixture folder is the app root.
+    private static Task<ProjectReadResult> Read(string fixture, string file)
+    {
+        var appRoot = Path.Combine(AppContext.BaseDirectory, "fixtures", fixture);
+        var reader = new ProjectFileReader(appRoot);
+        return reader.ReadAsync(Path.Combine(appRoot, file), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Sdk_style_project_has_sdk_and_net10()
+    {
+        var result = await Read("sdk-style-net10", "SdkStyle.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(ProjectStyle.Sdk, project.Style);
+        Assert.Equal(["net10.0"], project.TargetFrameworks);
+        Assert.Empty(result.Errors);
+    }
+
+    [Fact]
+    public async Task Legacy_project_gets_short_framework_name()
+    {
+        var result = await Read("old-style-net472", "OldStyle.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(ProjectStyle.Legacy, project.Style);
+        Assert.Null(project.Sdk);
+        Assert.Equal(["net472"], project.TargetFrameworks);
+    }
+
+    [Fact]
+    public async Task Multi_target_project_has_three_sorted_frameworks()
+    {
+        var result = await Read("multi-target", "MultiTarget.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(["net10.0", "net472", "netstandard2.0"], project.TargetFrameworks);
+    }
+
+    [Fact]
+    public async Task Vb_project_is_visual_basic_on_net40()
+    {
+        var result = await Read("vbproj-legacy", "OldVb.vbproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(ProjectLanguage.VisualBasic, project.Language);
+        Assert.Equal(["net40"], project.TargetFrameworks);
+    }
+
+    [Fact]
+    public async Task Broken_xml_gives_an_error_and_no_project()
+    {
+        var result = await Read("broken-xml", "Broken.csproj");
+
+        Assert.Null(result.Project);
+        var error = Assert.Single(result.Errors);
+        Assert.Equal(ScanErrorKind.InvalidXml, error.Kind);
+        Assert.Equal("Broken.csproj", error.Path);
+    }
+
+    [Fact]
+    public async Task Legacy_project_reads_packages_config_and_references()
+    {
+        var result = await Read("old-style-net472", "OldStyle.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        var package = Assert.Single(project.Packages);
+        Assert.Equal(new PackageRef("Newtonsoft.Json", "13.0.3", PackageSource.PackagesConfig, null), package);
+
+        Assert.Equal(2, project.AssemblyReferences.Count);
+        Assert.Equal(
+            "../packages/Newtonsoft.Json.13.0.3/lib/net45/Newtonsoft.Json.dll",
+            project.AssemblyReferences.Single(r => r.Name == "Newtonsoft.Json").HintPath);
+    }
+
+    [Fact]
+    public async Task Package_keeps_the_condition_of_its_item_group()
+    {
+        var result = await Read("multi-target", "MultiTarget.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        var package = Assert.Single(project.Packages);
+        Assert.Equal("System.Text.Json", package.Id);
+        Assert.Equal("'$(TargetFramework)' == 'net472'", package.Condition);
+    }
+
+    [Fact]
+    public async Task Project_reference_is_relative_to_the_app_root()
+    {
+        var result = await Read("props-inherit", "src/Lib/Lib.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(["src/Other/Other.csproj"], project.ProjectReferences);
+    }
+
+    [Fact]
+    public async Task Vb_project_has_sorted_assembly_references()
+    {
+        var result = await Read("vbproj-legacy", "OldVb.vbproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(["System.ServiceModel", "System.Web"], project.AssemblyReferences.Select(r => r.Name));
+    }
+}
+```
+
+- `new PackageRef(...)` in `Assert.Equal`: records compare by value. So you can compare a full record in one line.
+- `props-inherit` still has no framework in this step (it comes from `Directory.Build.props` in step 7). That is why the test checks only the reference.
+
+#### 6d. Build, test, commit
+
+```bash
+dotnet build
+dotnet test
+```
+
+Expect: 0 warnings, 10 tests green.
 
 Commit message:
 
@@ -854,9 +1298,42 @@ Conditions are stored as text and not evaluated. Windows paths become forward sl
 
 Why: in a modern repo, the version of a package is not in the `.csproj`. In our scan, `eShop` has 95 package versions and `eShopOnWeb` has 110 that come only from `Directory.Packages.props`.
 
-**Idea 1 — find the nearest props file, but stop at the app root.**
+**Built and tested 2026-11-11** in the scratch copy: 0 warnings, 13 tests green.
+
+**The files of this step**
+
+| Sub-step | File | New or change |
+|---|---|---|
+| 7a | `src/PortfolioLens.Extraction/DirectoryProps.cs` | new |
+| 7b | `src/PortfolioLens.Extraction/PropertyText.cs` | new |
+| 7c | `src/PortfolioLens.Extraction/ProjectFileReader.cs` | change: full file below |
+| 7d | `tests/PortfolioLens.UnitTests/ProjectFileReaderTests.cs` | change: full file below |
+
+How the reader uses the 2 new classes:
+
+```mermaid
+flowchart LR
+    R[ProjectFileReader] -->|FindNearestAsync| D[DirectoryProps<br/>cache per app]
+    D --> B[Directory.Build.props]
+    D --> P[Directory.Packages.props]
+    R -->|merge: build → packages → project| M[properties]
+    M -->|TryExpand| X[PropertyText]
+    P -->|PackageVersion items| C[central versions]
+```
+
+#### 7a. `DirectoryProps.cs` — find the nearest props file, but stop at the app root
+
+Why: many projects share one props file. Load it one time, and never look above the app.
+
+New file `src/PortfolioLens.Extraction/DirectoryProps.cs`:
 
 ```csharp
+using System.Collections.Concurrent;
+using System.Xml;
+using PortfolioLens.Core.Facts;
+
+namespace PortfolioLens.Extraction;
+
 // Finds and loads Directory.Build.props / Directory.Packages.props for one app.
 // Many projects share one props file. The cache loads each file one time.
 internal sealed class DirectoryProps(string appRoot)
@@ -904,47 +1381,607 @@ internal sealed class DirectoryProps(string appRoot)
 | `folder.StartsWith(appRoot)` | **Trap, and it will happen without this line:** `scan-input/` is inside this repo. This repo has its own `Directory.Build.props` with `net10.0`. With no stop at the app root, each cloned project with no framework gets `net10.0` from **our** file. The result looks correct and it is false |
 | `ConcurrentDictionary` | The workers of step 8 call this at the same time |
 | `Lazy<Task<…>>` | `GetOrAdd` can run its factory 2 times when 2 workers arrive together. `Lazy` makes sure that the file load runs one time. 28 projects of `eShop` share 1 file: 1 read, not 28 |
-| `Errors` bag | A broken props file is 1 error, not 1 error per project |
+| `Errors` bag | A broken props file is 1 error, not 1 error per project. Step 8 adds these errors to the app |
 
-**Idea 2 — the lookup order.** MSBuild reads `Directory.Build.props`, then `Directory.Packages.props`, then the project. A later file wins. So merge the 3 property dictionaries in that order.
+#### 7b. `PropertyText.cs` — replace `$(Name)`, and say when you cannot
 
-- **Real data that surprised me:** `eShopOnWeb` puts `<TargetFramework>net10.0</TargetFramework>` in `Directory.Packages.props`. It has no `Directory.Build.props`. My first version looked only in `Directory.Build.props` and gave 11 errors "No target framework found". So the packages file is also a source of properties.
+Why: `Version="$(SerilogVersion)"` and `<TargetFramework>$(NetVersion)</TargetFramework>` are normal. We replace what we know, and we report the rest.
 
-**Idea 3 — replace `$(Name)`, and say when you cannot.**
+New file `src/PortfolioLens.Extraction/PropertyText.cs`:
 
 ```csharp
-[GeneratedRegex(@"\$\(([A-Za-z_][A-Za-z0-9_.-]*)\)")]
-private static partial Regex PropertyUse();
+using System.Text.RegularExpressions;
 
-// Replaces $(Name) with its value. Returns false if a $(...) stays in the text.
-public static bool TryExpand(string raw, IReadOnlyDictionary<string, string> properties, out string value)
+namespace PortfolioLens.Extraction;
+
+internal static partial class PropertyText
 {
-    value = raw;
-    for (var round = 0; round < 5 && value.Contains("$(", StringComparison.Ordinal); round++)
-    {
-        value = PropertyUse().Replace(
-            value,
-            match => properties.TryGetValue(match.Groups[1].Value, out var found) ? found : match.Value);
-    }
+    [GeneratedRegex(@"\$\(([A-Za-z_][A-Za-z0-9_.-]*)\)")]
+    private static partial Regex PropertyUse();
 
-    return !value.Contains("$(", StringComparison.Ordinal);
+    // Replaces $(Name) with its value. Returns false if a $(...) stays in the text.
+    public static bool TryExpand(string raw, IReadOnlyDictionary<string, string> properties, out string value)
+    {
+        value = raw;
+        for (var round = 0; round < 5 && value.Contains("$(", StringComparison.Ordinal); round++)
+        {
+            value = PropertyUse().Replace(
+                value,
+                match => properties.TryGetValue(match.Groups[1].Value, out var found) ? found : match.Value);
+        }
+
+        return !value.Contains("$(", StringComparison.Ordinal);
+    }
 }
 ```
 
 - `[GeneratedRegex]` writes the regex code at build time. The class must be `partial`. The analyzers ask for this form.
 - 5 rounds: a property can use another property. The limit stops a loop (`A` = `$(B)`, `B` = `$(A)`).
-- Returns false → keep the raw text **and** add a `ScanError` of kind `Unresolved`. Do not guess.
-- Use it on: the 3 framework properties, each package version, each `ProjectReference` path.
+- Returns false → the caller keeps the raw text **and** adds a `ScanError` of kind `Unresolved`. Do not guess.
 - **Real data:** `nopCommerce-4.90` has `<ProjectReference Include="$(SolutionDir)\Presentation\…">` in 26 plugin projects. Only a build from a solution knows `SolutionDir`. Our scan gives 26 `Unresolved` errors. That is the correct result.
 
-**Idea 4 — central versions.** You write it:
+#### 7c. `ProjectFileReader.cs` — use the props files and the central versions
 
-1. Read each `<PackageVersion Include="…" Version="…" />` of the nearest `Directory.Packages.props` into a dictionary (ignore case on the id). Expand the version.
-2. A `PackageReference` with its own version (attribute, child element, or `VersionOverride`) → source `PackageReference`.
-3. No own version, but the id is in the dictionary → that version, source `CentralPackage`.
-4. Neither → version null, source `PackageReference`. No error: a `.targets` file or an SDK can also set the version.
+Why: the reader now looks at 3 files, not 1.
 
-Tests: `central-packages` → `Newtonsoft.Json 13.0.3 CentralPackage`, `Serilog 4.4.0 CentralPackage` (through the property), `NotInTheCentralFile` with null. `props-inherit` → `["net8.0"]`. `unresolved-property` → frameworks `["$(NetVersion)"]` and 1 `Unresolved` error.
+New compared to step 6:
+
+- The constructor takes `DirectoryProps`.
+- `ReadAsync` loads the 2 props files and merges the properties (`MergeProperties`).
+- `Expand` turns a `$(…)` that cannot be resolved into a `ScanError`.
+- `ReadCentralVersions` reads `<PackageVersion>` items.
+- `ReadPackageReferences` takes a central version when the item has no own version.
+- `ReadProjectReferences` expands `$(…)` in the path.
+- The dictionary parameters are now `Dictionary<string, string>`, not `IReadOnlyDictionary` (see the trap below).
+
+The full file after the change:
+
+```csharp
+using System.Xml;
+using System.Xml.Linq;
+using PortfolioLens.Core.Facts;
+
+namespace PortfolioLens.Extraction;
+
+// Reads the facts of one project file. One instance per app.
+internal sealed class ProjectFileReader(string appRoot, DirectoryProps directoryProps)
+{
+    public async Task<ProjectReadResult> ReadAsync(string projectPath, CancellationToken ct)
+    {
+        var relativePath = PathText.Relative(appRoot, projectPath);
+
+        MsBuildFile file;
+        try
+        {
+            file = await MsBuildFile.LoadAsync(projectPath, ct);
+        }
+        catch (XmlException ex)
+        {
+            var error = new ScanError(relativePath, ScanErrorKind.InvalidXml, ex.Message);
+            return new ProjectReadResult(null, [error]);
+        }
+
+        var errors = new List<ScanError>();
+
+        // MSBuild order: Directory.Build.props, then Directory.Packages.props, then the project. A later file wins.
+        var buildProps = await directoryProps.FindNearestAsync(projectPath, "Directory.Build.props", ct);
+        var packagesProps = await directoryProps.FindNearestAsync(projectPath, "Directory.Packages.props", ct);
+        var properties = MergeProperties(buildProps, packagesProps, file);
+
+        var sdk = FindSdk(file.Root, file.Ns);
+        var style = sdk is null ? ProjectStyle.Legacy : ProjectStyle.Sdk;
+
+        var frameworks = ReadFrameworks(properties);
+        if (frameworks.Count == 0)
+        {
+            errors.Add(new ScanError(relativePath, ScanErrorKind.Unresolved, "No target framework found"));
+        }
+
+        foreach (var framework in frameworks.Where(f => f.Contains("$(", StringComparison.Ordinal)))
+        {
+            errors.Add(new ScanError(
+                relativePath, ScanErrorKind.Unresolved, $"Cannot resolve target framework: {framework}"));
+        }
+
+        var centralVersions = ReadCentralVersions(packagesProps);
+        var packages = ReadPackageReferences(file, centralVersions, properties, relativePath, errors);
+        if (style == ProjectStyle.Legacy)
+        {
+            packages.AddRange(await ReadPackagesConfigAsync(projectPath, errors, ct));
+        }
+
+        var project = new ProjectFacts(
+            Path: relativePath,
+            Language: LanguageOf(projectPath),
+            Style: style,
+            Sdk: sdk,
+            OutputType: properties.GetValueOrDefault("OutputType"),
+            TargetFrameworks: frameworks,
+            Packages: SortPackages(packages),
+            ProjectReferences: ReadProjectReferences(file, projectPath, properties, relativePath, errors),
+            AssemblyReferences: ReadAssemblyReferences(file));
+
+        return new ProjectReadResult(project, errors);
+    }
+
+    // Merges the properties of the 3 files, then replaces each $(Name) that it can.
+    // A value that cannot be expanded stays raw. It becomes an error only where we use it.
+    private static Dictionary<string, string> MergeProperties(
+        MsBuildFile? buildProps, MsBuildFile? packagesProps, MsBuildFile project)
+    {
+        var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var source in new[] { buildProps, packagesProps, project })
+        {
+            if (source is null)
+            {
+                continue;
+            }
+
+            foreach (var (name, value) in source.Properties)
+            {
+                merged[name] = value;
+            }
+        }
+
+        var expanded = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, raw) in merged)
+        {
+            _ = PropertyText.TryExpand(raw, merged, out var value);
+            expanded[name] = value;
+        }
+
+        return expanded;
+    }
+
+    // Expands $(Name). If it cannot: keep the raw text and record an Unresolved error. Never guess.
+    private static string Expand(
+        string raw, Dictionary<string, string> properties, string what, string relativePath, List<ScanError> errors)
+    {
+        if (PropertyText.TryExpand(raw, properties, out var value))
+        {
+            return value;
+        }
+
+        errors.Add(new ScanError(relativePath, ScanErrorKind.Unresolved, $"Cannot resolve {what}: {raw}"));
+        return raw;
+    }
+
+    private static ProjectLanguage LanguageOf(string projectPath)
+    {
+        var extension = Path.GetExtension(projectPath);
+        if (extension.Equals(".vbproj", StringComparison.OrdinalIgnoreCase))
+        {
+            return ProjectLanguage.VisualBasic;
+        }
+
+        if (extension.Equals(".fsproj", StringComparison.OrdinalIgnoreCase))
+        {
+            return ProjectLanguage.FSharp;
+        }
+
+        return ProjectLanguage.CSharp;
+    }
+
+    // SDK-style has the Sdk text in 1 of 3 places. Legacy has none -> null.
+    private static string? FindSdk(XElement root, XNamespace ns)
+    {
+        // 1. <Project Sdk="Microsoft.NET.Sdk.Web">
+        var fromRoot = root.Attribute("Sdk")?.Value;
+        if (!string.IsNullOrWhiteSpace(fromRoot))
+        {
+            return fromRoot.Trim();
+        }
+
+        // 2. <Project><Sdk Name="Microsoft.NET.Sdk" />
+        var fromSdkElement = root.Elements(ns + "Sdk")
+            .Select(sdk => sdk.Attribute("Name")?.Value)
+            .FirstOrDefault(name => !string.IsNullOrWhiteSpace(name));
+        if (fromSdkElement is not null)
+        {
+            return fromSdkElement.Trim();
+        }
+
+        // 3. <Project><Import Sdk="Microsoft.NET.Sdk" Project="Sdk.props" />
+        var fromImport = root.Elements(ns + "Import")
+            .Select(import => import.Attribute("Sdk")?.Value)
+            .FirstOrDefault(sdk => !string.IsNullOrWhiteSpace(sdk));
+        return fromImport?.Trim();
+    }
+
+    // Lookup order: TargetFrameworks -> TargetFramework -> TargetFrameworkVersion.
+    // The first one with a value wins. Unknown text stays as raw text (step 7 needs this).
+    private static List<string> ReadFrameworks(Dictionary<string, string> properties)
+    {
+        if (properties.TryGetValue("TargetFrameworks", out var many) && !string.IsNullOrWhiteSpace(many))
+        {
+            return [.. many
+                .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(moniker => FrameworkName.FromMoniker(moniker) ?? moniker)
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)];
+        }
+
+        if (properties.TryGetValue("TargetFramework", out var one) && !string.IsNullOrWhiteSpace(one))
+        {
+            return [FrameworkName.FromMoniker(one) ?? one.Trim()];
+        }
+
+        if (properties.TryGetValue("TargetFrameworkVersion", out var legacy) && !string.IsNullOrWhiteSpace(legacy))
+        {
+            return [FrameworkName.FromLegacyVersion(legacy) ?? legacy.Trim()];
+        }
+
+        return [];
+    }
+
+    // <PackageVersion Include="Serilog" Version="4.4.0" /> from Directory.Packages.props. Id ignores case, as in NuGet.
+    private static Dictionary<string, string> ReadCentralVersions(MsBuildFile? packagesProps)
+    {
+        var versions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (packagesProps is null)
+        {
+            return versions;
+        }
+
+        foreach (var item in packagesProps.Root.Descendants(packagesProps.Ns + "PackageVersion"))
+        {
+            var id = item.Attribute("Include")?.Value.Trim();
+            var version = ValueOf(item, packagesProps.Ns, "Version");
+            if (!string.IsNullOrEmpty(id) && version is not null)
+            {
+                versions.TryAdd(id, version);
+            }
+        }
+
+        return versions;
+    }
+
+    // <PackageReference Include="..." />. An item with Update and no Include changes an item. It does not add one.
+    private static List<PackageRef> ReadPackageReferences(
+        MsBuildFile file,
+        Dictionary<string, string> centralVersions,
+        Dictionary<string, string> properties,
+        string relativePath,
+        List<ScanError> errors)
+    {
+        var packages = new List<PackageRef>();
+        foreach (var item in file.Root.Descendants(file.Ns + "PackageReference"))
+        {
+            var id = item.Attribute("Include")?.Value.Trim();
+            if (string.IsNullOrEmpty(id))
+            {
+                continue;
+            }
+
+            var ownVersion = ValueOf(item, file.Ns, "VersionOverride") ?? ValueOf(item, file.Ns, "Version");
+
+            string? version;
+            PackageSource source;
+            if (ownVersion is not null)
+            {
+                (version, source) = (ownVersion, PackageSource.PackageReference);
+            }
+            else if (centralVersions.TryGetValue(id, out var centralVersion))
+            {
+                (version, source) = (centralVersion, PackageSource.CentralPackage);
+            }
+            else
+            {
+                // No error: a .targets file or an SDK can also set the version.
+                (version, source) = (null, PackageSource.PackageReference);
+            }
+
+            if (version is not null)
+            {
+                version = Expand(version, properties, $"version of {id}", relativePath, errors);
+            }
+
+            packages.Add(new PackageRef(id, version, source, ConditionOf(item)));
+        }
+
+        return packages;
+    }
+
+    // MSBuild accepts both forms: Version="1.0" and <Version>1.0</Version>.
+    private static string? ValueOf(XElement item, XNamespace ns, string name)
+    {
+        var value = item.Attribute(name)?.Value ?? item.Element(ns + name)?.Value;
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
+    // The condition of the item, or else the condition of its ItemGroup. Stored as text. Not evaluated.
+    private static string? ConditionOf(XElement item) =>
+        item.Attribute("Condition")?.Value ?? item.Parent?.Attribute("Condition")?.Value;
+
+    // packages.config is next to the legacy project. It has no XML namespace.
+    private async Task<List<PackageRef>> ReadPackagesConfigAsync(
+        string projectPath, List<ScanError> errors, CancellationToken ct)
+    {
+        var path = Path.Combine(Path.GetDirectoryName(projectPath)!, "packages.config");
+        if (!File.Exists(path))
+        {
+            return [];
+        }
+
+        XDocument doc;
+        try
+        {
+            await using var stream = new FileStream(
+                path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true);
+            doc = await XDocument.LoadAsync(stream, LoadOptions.None, ct);
+        }
+        catch (XmlException ex)
+        {
+            errors.Add(new ScanError(PathText.Relative(appRoot, path), ScanErrorKind.InvalidXml, ex.Message));
+            return [];
+        }
+
+        var packages = new List<PackageRef>();
+        foreach (var package in doc.Root!.Elements("package"))
+        {
+            var id = package.Attribute("id")?.Value.Trim();
+            if (!string.IsNullOrEmpty(id))
+            {
+                var version = package.Attribute("version")?.Value.Trim();
+                packages.Add(new PackageRef(id, version, PackageSource.PackagesConfig, null));
+            }
+        }
+
+        return packages;
+    }
+
+    // "..\Other\Other.csproj" -> "src/Other/Other.csproj" (relative to the app root, with '/').
+    // "$(SolutionDir)\X\X.csproj" cannot be resolved -> keep the raw text, with '/', and record an error.
+    private List<string> ReadProjectReferences(
+        MsBuildFile file,
+        string projectPath,
+        Dictionary<string, string> properties,
+        string relativePath,
+        List<ScanError> errors)
+    {
+        var references = new List<string>();
+        foreach (var item in file.Root.Descendants(file.Ns + "ProjectReference"))
+        {
+            var include = item.Attribute("Include")?.Value.Trim();
+            if (string.IsNullOrEmpty(include))
+            {
+                continue;
+            }
+
+            if (PropertyText.TryExpand(include, properties, out var expanded))
+            {
+                references.Add(PathText.RelativeFromProject(appRoot, projectPath, expanded));
+            }
+            else
+            {
+                errors.Add(new ScanError(
+                    relativePath, ScanErrorKind.Unresolved, $"Cannot resolve project reference: {include}"));
+                references.Add(include.Replace('\\', '/'));
+            }
+        }
+
+        return [.. references.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)];
+    }
+
+    // <Reference Include="Newtonsoft.Json, Version=13.0.0.0, ..."> -> name "Newtonsoft.Json".
+    private static List<AssemblyRef> ReadAssemblyReferences(MsBuildFile file)
+    {
+        var references = new List<AssemblyRef>();
+        foreach (var item in file.Root.Descendants(file.Ns + "Reference"))
+        {
+            var include = item.Attribute("Include")?.Value;
+            if (string.IsNullOrWhiteSpace(include))
+            {
+                continue;
+            }
+
+            var name = include.Split(',')[0].Trim();
+            var hintPath = item.Element(file.Ns + "HintPath")?.Value.Trim().Replace('\\', '/');
+            references.Add(new AssemblyRef(name, hintPath));
+        }
+
+        return [.. references
+            .OrderBy(r => r.Name, StringComparer.Ordinal)
+            .ThenBy(r => r.HintPath, StringComparer.Ordinal)];
+    }
+
+    // Ordinal sort: the same order on each machine.
+    private static List<PackageRef> SortPackages(List<PackageRef> packages) =>
+    [
+        .. packages
+            .OrderBy(p => p.Id, StringComparer.Ordinal)
+            .ThenBy(p => p.Version, StringComparer.Ordinal)
+            .ThenBy(p => p.Condition, StringComparer.Ordinal),
+    ];
+}
+```
+
+**The lookup order.** MSBuild reads `Directory.Build.props`, then `Directory.Packages.props`, then the project. A later file wins. `MergeProperties` does the same.
+
+- **Real data that surprised me:** `eShopOnWeb` puts `<TargetFramework>net10.0</TargetFramework>` in `Directory.Packages.props`. It has no `Directory.Build.props`. My first version looked only in `Directory.Build.props` and gave 11 errors "No target framework found". So the packages file is also a source of properties.
+
+**The central version rules** (in `ReadPackageReferences`):
+
+1. The item has its own version (attribute, child element, or `VersionOverride`) → source `PackageReference`.
+2. No own version, but the id is in `Directory.Packages.props` → that version, source `CentralPackage`.
+3. Neither → version null, source `PackageReference`. No error: a `.targets` file or an SDK can also set the version.
+
+| Part | Reason |
+|---|---|
+| `MergeProperties` expands all values one time | Then `ReadFrameworks` from step 5 works with no change. A value that cannot be expanded stays raw |
+| Error only where we **use** a value | A props file has many properties that we never read (`$(MSBuildThisFileDirectory)`…). They must not give errors |
+| `frameworks.Where(f => f.Contains("$("))` | The `unresolved-property` fixture keeps `$(NetVersion)` as its framework, and we record 1 error for it |
+| `_ = PropertyText.TryExpand(...)` | `_ =` says "I ignore the bool on purpose" |
+| Central id ignores case | NuGet ids ignore case: `serilog` = `Serilog` |
+| Unresolved project reference keeps the raw text, with `/` | The fact is still useful for a person. The error says why it is not a real path |
+
+- **Trap (analyzer CA1859):** a `private` method with an `IReadOnlyDictionary` parameter that always gets a `Dictionary` fails the build: "Change type of parameter … for improved performance". I hit this. That is why the private methods take `Dictionary<string, string>`. Public methods keep the interface.
+
+#### 7d. The tests
+
+Why: 3 new tests, one for each new file the reader looks at. The test helper now makes a `DirectoryProps`.
+
+The full file after the change:
+
+```csharp
+using PortfolioLens.Core.Facts;
+using PortfolioLens.Extraction;
+
+namespace PortfolioLens.UnitTests;
+
+public class ProjectFileReaderTests
+{
+    // Reads one project file of one fixture. The fixture folder is the app root.
+    private static Task<ProjectReadResult> Read(string fixture, string file)
+    {
+        var appRoot = Path.Combine(AppContext.BaseDirectory, "fixtures", fixture);
+        var reader = new ProjectFileReader(appRoot, new DirectoryProps(appRoot));
+        return reader.ReadAsync(Path.Combine(appRoot, file), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Sdk_style_project_has_sdk_and_net10()
+    {
+        var result = await Read("sdk-style-net10", "SdkStyle.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(ProjectStyle.Sdk, project.Style);
+        Assert.Equal(["net10.0"], project.TargetFrameworks);
+        Assert.Empty(result.Errors);
+    }
+
+    [Fact]
+    public async Task Legacy_project_gets_short_framework_name()
+    {
+        var result = await Read("old-style-net472", "OldStyle.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(ProjectStyle.Legacy, project.Style);
+        Assert.Null(project.Sdk);
+        Assert.Equal(["net472"], project.TargetFrameworks);
+    }
+
+    [Fact]
+    public async Task Multi_target_project_has_three_sorted_frameworks()
+    {
+        var result = await Read("multi-target", "MultiTarget.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(["net10.0", "net472", "netstandard2.0"], project.TargetFrameworks);
+    }
+
+    [Fact]
+    public async Task Vb_project_is_visual_basic_on_net40()
+    {
+        var result = await Read("vbproj-legacy", "OldVb.vbproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(ProjectLanguage.VisualBasic, project.Language);
+        Assert.Equal(["net40"], project.TargetFrameworks);
+    }
+
+    [Fact]
+    public async Task Broken_xml_gives_an_error_and_no_project()
+    {
+        var result = await Read("broken-xml", "Broken.csproj");
+
+        Assert.Null(result.Project);
+        var error = Assert.Single(result.Errors);
+        Assert.Equal(ScanErrorKind.InvalidXml, error.Kind);
+        Assert.Equal("Broken.csproj", error.Path);
+    }
+
+    [Fact]
+    public async Task Legacy_project_reads_packages_config_and_references()
+    {
+        var result = await Read("old-style-net472", "OldStyle.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        var package = Assert.Single(project.Packages);
+        Assert.Equal(new PackageRef("Newtonsoft.Json", "13.0.3", PackageSource.PackagesConfig, null), package);
+
+        Assert.Equal(2, project.AssemblyReferences.Count);
+        Assert.Equal(
+            "../packages/Newtonsoft.Json.13.0.3/lib/net45/Newtonsoft.Json.dll",
+            project.AssemblyReferences.Single(r => r.Name == "Newtonsoft.Json").HintPath);
+    }
+
+    [Fact]
+    public async Task Package_keeps_the_condition_of_its_item_group()
+    {
+        var result = await Read("multi-target", "MultiTarget.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        var package = Assert.Single(project.Packages);
+        Assert.Equal("System.Text.Json", package.Id);
+        Assert.Equal("'$(TargetFramework)' == 'net472'", package.Condition);
+    }
+
+    [Fact]
+    public async Task Project_reference_is_relative_to_the_app_root()
+    {
+        var result = await Read("props-inherit", "src/Lib/Lib.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(["src/Other/Other.csproj"], project.ProjectReferences);
+    }
+
+    [Fact]
+    public async Task Vb_project_has_sorted_assembly_references()
+    {
+        var result = await Read("vbproj-legacy", "OldVb.vbproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(["System.ServiceModel", "System.Web"], project.AssemblyReferences.Select(r => r.Name));
+    }
+
+    [Fact]
+    public async Task Central_versions_come_from_Directory_Packages_props()
+    {
+        var result = await Read("central-packages", "src/App/App.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(
+            [
+                new PackageRef("Newtonsoft.Json", "13.0.3", PackageSource.CentralPackage, null),
+                new PackageRef("NotInTheCentralFile", null, PackageSource.PackageReference, null),
+                new PackageRef("Serilog", "4.4.0", PackageSource.CentralPackage, null),
+            ],
+            project.Packages);
+        Assert.Empty(result.Errors);
+    }
+
+    [Fact]
+    public async Task Framework_comes_from_Directory_Build_props()
+    {
+        var result = await Read("props-inherit", "src/Lib/Lib.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(["net8.0"], project.TargetFrameworks);
+        Assert.Empty(result.Errors);
+    }
+
+    [Fact]
+    public async Task Unknown_property_stays_raw_and_becomes_an_error()
+    {
+        var result = await Read("unresolved-property", "Unresolved.csproj");
+
+        var project = Assert.IsType<ProjectFacts>(result.Project);
+        Assert.Equal(["$(NetVersion)"], project.TargetFrameworks);
+        var error = Assert.Single(result.Errors);
+        Assert.Equal(ScanErrorKind.Unresolved, error.Kind);
+    }
+}
+```
+
+#### 7e. Build, test, commit
+
+```bash
+dotnet build
+dotnet test
+```
+
+Expect: 0 warnings, 13 tests green.
 
 Commit message:
 
@@ -961,14 +1998,34 @@ Why: one slow or bad file must not hold or stop the others. And the walker must 
 
 New ideas: a bounded `Channel<T>` (a queue with a size limit) and `Parallel.ForEachAsync`.
 
-`src/PortfolioLens.Extraction/AppScanner.cs`:
+**Built and tested 2026-11-11** in the scratch copy: 0 warnings, 16 tests green.
+
+**The files of this step**
+
+| Sub-step | File | New or change |
+|---|---|---|
+| 8a | `src/PortfolioLens.Extraction/AppScanner.cs` | new |
+| 8b | `tests/PortfolioLens.UnitTests/ExtractorTests.cs` | new |
+
+#### 8a. `AppScanner.cs` — the public door
+
+Why: this is the only `public` class with logic. The CLI and the tests call it.
+
+New file `src/PortfolioLens.Extraction/AppScanner.cs`:
 
 ```csharp
+using System.Collections.Concurrent;
+using System.Threading.Channels;
+using PortfolioLens.Core.Facts;
+
+namespace PortfolioLens.Extraction;
+
 public static class AppScanner
 {
     public static async Task<AppFacts> ScanAsync(string appRoot, int parallel, CancellationToken ct)
     {
-        appRoot = Path.GetFullPath(appRoot);
+        // Full path, no '/' at the end. Else Path.GetFileName gives "" for "scan-input/eShop/".
+        appRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(appRoot));
         var directoryProps = new DirectoryProps(appRoot);
         var reader = new ProjectFileReader(appRoot, directoryProps);
 
@@ -1067,12 +2124,15 @@ sequenceDiagram
 
 | Part | Reason |
 |---|---|
+| `TrimEndingDirectorySeparator` | `scan-input/eShop/` with a `/` at the end gives an empty app name without it |
 | `CreateBounded(256)` + `Wait` | The walker stops when 256 paths wait. Memory has a limit |
 | `finally { Complete(failure) }` | **Trap:** with no `Complete`, the readers wait forever and the program hangs. `finally` runs on success, on error, and on cancel |
 | `Task.Run` for the producer | The walker is synchronous code. It must not run on the thread that starts the readers |
 | `Parallel.ForEachAsync` over `ReadAllAsync` | N workers with 1 line. It ends when the channel is complete and empty |
+| `.sln` / `.slnx` → `solutions` | The walker sends them too. We record the path only (decision: no parsing) |
 | `catch … when (ex is not OperationCanceledException)` | One bad file becomes a `ScanError`. Ctrl+C must still stop the run, so that exception goes through |
 | `ConcurrentBag` | Many workers add at the same time. A `List<T>` breaks here, sometimes, and only under load |
+| `directoryProps.Errors` in the result | A broken props file is reported 1 time, for the app |
 | `StringComparer.Ordinal` in each sort | **Trap:** the default string sort depends on the language of the machine. `Ordinal` gives the same order on each machine. The output must be byte-identical |
 | Apps one after the other | When an app is done, its facts are complete. Memory holds the facts of 1 app only |
 
@@ -1081,16 +2141,25 @@ Be honest about the bound (you can be asked): in Phase 1 the channel holds short
 - I did **not** use a second channel for the results. The facts are small, and the sort needs all of them anyway.
 - Known limit: after Ctrl+C the walker task can run some moments more, until the process ends. That is OK for a CLI. In the Phase 4 worker it is not OK; we fix it there.
 
-Tests for this step (the scanner is public, so no `InternalsVisibleTo` is needed here):
+#### 8b. The tests
+
+Why: these test the full pipeline through the public door. `ProjectFileReaderTests` stays: it tests one file at a time.
+
+New file `tests/PortfolioLens.UnitTests/ExtractorTests.cs`:
 
 ```csharp
+using PortfolioLens.Core.Facts;
+using PortfolioLens.Extraction;
+
+namespace PortfolioLens.UnitTests;
+
 public class ExtractorTests
 {
+    private static string FixturePath(string name) =>
+        Path.Combine(AppContext.BaseDirectory, "fixtures", name);
+
     private static Task<AppFacts> ScanFixture(string name) =>
-        AppScanner.ScanAsync(
-            Path.Combine(AppContext.BaseDirectory, "fixtures", name),
-            parallel: 4,
-            TestContext.Current.CancellationToken);
+        AppScanner.ScanAsync(FixturePath(name), parallel: 4, TestContext.Current.CancellationToken);
 
     [Fact]
     public async Task Broken_xml_becomes_an_error_and_the_scan_continues()
@@ -1102,10 +2171,39 @@ public class ExtractorTests
         Assert.Equal(ScanErrorKind.InvalidXml, error.Kind);
         Assert.Equal("Broken.csproj", error.Path);
     }
+
+    [Fact]
+    public async Task App_name_is_the_folder_name()
+    {
+        var app = await ScanFixture("multi-target");
+
+        Assert.Equal("multi-target", app.Name);
+        Assert.Equal("MultiTarget.csproj", Assert.Single(app.Projects).Path);
+    }
+
+    [Fact]
+    public async Task Cancelled_token_stops_the_scan()
+    {
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => AppScanner.ScanAsync(FixturePath("multi-target"), parallel: 4, cts.Token));
+    }
 }
 ```
 
-Add one more: a `CancellationTokenSource` that is already cancelled → `await Assert.ThrowsAnyAsync<OperationCanceledException>(…)`.
+- `cts.CancelAsync()`: the token is cancelled before the scan starts. The scan must throw, not hang.
+- The cancel test uses its own token, not `TestContext.Current.CancellationToken`. That is OK for the analyzer, because a token is passed.
+
+#### 8c. Build, test, commit
+
+```bash
+dotnet build
+dotnet test
+```
+
+Expect: 0 warnings, 16 tests green.
 
 Commit message:
 
@@ -1120,9 +2218,32 @@ An exception in one file becomes a ScanError and the scan continues. The result 
 
 Why: Phase 2 loads this JSON into a database. Same input must give the same bytes, or each scan looks like a change.
 
-**The JSON.** `src/PortfolioLens.Extraction/FactsJson.cs`:
+**Built and tested 2026-11-11** in the scratch copy: 0 warnings. First run: 8 snapshot tests fail (correct). After the accept: 24 tests green.
+
+**The files of this step**
+
+| Sub-step | File | New or change |
+|---|---|---|
+| 9a | `src/PortfolioLens.Extraction/FactsJson.cs` | new |
+| 9b | `tests/PortfolioLens.UnitTests/Snapshot.cs` | new |
+| 9c | `tests/PortfolioLens.UnitTests/ExtractorTests.cs` | change: full file below |
+| 9d | `.gitignore` | change: add 1 line |
+| 9e | `.gitattributes` (repo root) | new |
+| 9f | `tests/PortfolioLens.UnitTests/Snapshots/*.verified.json` | made by the test, you accept them |
+
+#### 9a. `FactsJson.cs` — the JSON
+
+Why: one place that turns `AppFacts` into bytes. The CLI writes files with it, and the tests compare text with it.
+
+New file `src/PortfolioLens.Extraction/FactsJson.cs`:
 
 ```csharp
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using PortfolioLens.Core.Facts;
+
+namespace PortfolioLens.Extraction;
+
 [JsonSourceGenerationOptions(
     WriteIndented = true,
     NewLine = "\n",
@@ -1156,12 +2277,13 @@ public static class FactsJson
 | Part | Reason |
 |---|---|
 | Source generator (`JsonSerializerContext`) | The serializer code is made at build time. No reflection at run time. It is faster to start and it works with trimming and AOT later |
+| `internal ... FactsJsonContext` | Only `FactsJson` uses it. The public API is `ToJson` and `WriteAsync` |
 | `NewLine = "\n"` | **Trap:** the default is the line end of the machine. Windows writes `\r\n`. Then the output is not byte-identical between machines |
 | `UseStringEnumConverter` | `"style": "Legacy"` in the file, not `"style": 1`. A person can read it, and a new enum value does not shift the numbers |
 | `SerializeAsync` to a stream | The JSON goes to the file in parts. No big string in memory |
 | temp file + `File.Move` | A rename is one step for the file system. Ctrl+C in the middle of a write leaves the old file or no file. Never a half file. The `await using` block must end **before** the move, so the file is closed |
 
-This is the real output for `fixtures/old-style-net472` (from my run):
+This is the real output for `fixtures/old-style-net472` (from the scratch run on 2026-11-11):
 
 ```json
 {
@@ -1202,9 +2324,11 @@ This is the real output for `fixtures/old-style-net472` (from my run):
 }
 ```
 
-**The snapshot helper.** A snapshot test saves the full output in a file in git. Each later run compares with that file. It catches a change in a field that no `Assert` names.
+#### 9b. `Snapshot.cs` — the snapshot helper
 
-`tests/PortfolioLens.UnitTests/Snapshot.cs`:
+Why: a snapshot test saves the full output in a file in git. Each later run compares with that file. It catches a change in a field that no `Assert` names.
+
+New file `tests/PortfolioLens.UnitTests/Snapshot.cs`:
 
 ```csharp
 using System.Runtime.CompilerServices;
@@ -1235,54 +2359,114 @@ internal static class Snapshot
 }
 ```
 
-The test:
+#### 9c. `ExtractorTests.cs` — add the snapshot test
+
+Why: one test per fixture. 8 fixtures → 8 snapshot files.
+
+The full file after the change. New compared to step 8: the `[Theory]` at the end.
 
 ```csharp
-[Theory]
-[InlineData("sdk-style-net10")]
-[InlineData("old-style-net472")]
-[InlineData("multi-target")]
-[InlineData("central-packages")]
-[InlineData("props-inherit")]
-[InlineData("unresolved-property")]
-[InlineData("broken-xml")]
-[InlineData("vbproj-legacy")]
-public async Task Fixture_json_does_not_change(string fixture)
-{
-    var app = await ScanFixture(fixture);
+using PortfolioLens.Core.Facts;
+using PortfolioLens.Extraction;
 
-    Snapshot.Match(FactsJson.ToJson(app), fixture);
+namespace PortfolioLens.UnitTests;
+
+public class ExtractorTests
+{
+    private static string FixturePath(string name) =>
+        Path.Combine(AppContext.BaseDirectory, "fixtures", name);
+
+    private static Task<AppFacts> ScanFixture(string name) =>
+        AppScanner.ScanAsync(FixturePath(name), parallel: 4, TestContext.Current.CancellationToken);
+
+    [Fact]
+    public async Task Broken_xml_becomes_an_error_and_the_scan_continues()
+    {
+        var app = await ScanFixture("broken-xml");
+
+        Assert.Equal("Good.csproj", Assert.Single(app.Projects).Path);
+        var error = Assert.Single(app.Errors);
+        Assert.Equal(ScanErrorKind.InvalidXml, error.Kind);
+        Assert.Equal("Broken.csproj", error.Path);
+    }
+
+    [Fact]
+    public async Task App_name_is_the_folder_name()
+    {
+        var app = await ScanFixture("multi-target");
+
+        Assert.Equal("multi-target", app.Name);
+        Assert.Equal("MultiTarget.csproj", Assert.Single(app.Projects).Path);
+    }
+
+    [Fact]
+    public async Task Cancelled_token_stops_the_scan()
+    {
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => AppScanner.ScanAsync(FixturePath("multi-target"), parallel: 4, cts.Token));
+    }
+
+    [Theory]
+    [InlineData("sdk-style-net10")]
+    [InlineData("old-style-net472")]
+    [InlineData("multi-target")]
+    [InlineData("central-packages")]
+    [InlineData("props-inherit")]
+    [InlineData("unresolved-property")]
+    [InlineData("broken-xml")]
+    [InlineData("vbproj-legacy")]
+    public async Task Fixture_json_does_not_change(string fixture)
+    {
+        var app = await ScanFixture(fixture);
+
+        Snapshot.Match(FactsJson.ToJson(app), fixture);
+    }
 }
 ```
 
-How you use it:
+#### 9d. `.gitignore` — never commit a `received` file
 
-1. First run: 8 tests fail. That is correct. 8 files `*.received.json` are in `tests/PortfolioLens.UnitTests/Snapshots/`.
-2. **Read each file.** You are the judge. Is this the output you want?
-3. Accept them:
-
-```bash
-cd tests/PortfolioLens.UnitTests/Snapshots
-for f in *.received.json; do mv "$f" "${f%.received.json}.verified.json"; done
-cd ../../..
-dotnet test
-```
-
-Expected: all green.
-
-Add to the end of `.gitignore`:
+Add this line to the end of `.gitignore`:
 
 ```gitignore
 *.received.*
 ```
 
-Make `.gitattributes` in the repo root:
+#### 9e. `.gitattributes` — fixed line ends for snapshots
+
+New file `.gitattributes` in the repo root:
 
 ```gitattributes
 *.verified.json text eol=lf
 ```
 
-- **Trap:** without the `.gitattributes` line, git on Windows changes `\n` to `\r\n` on checkout. The snapshot then never matches on Windows.
+- **Trap:** without this line, git on Windows changes `\n` to `\r\n` on checkout. The snapshot then never matches on Windows.
+
+#### 9f. Run, read, accept
+
+1. Run the tests:
+
+   ```bash
+   dotnet build
+   dotnet test
+   ```
+
+   First run: 8 tests fail. That is correct. 8 files `*.received.json` are in `tests/PortfolioLens.UnitTests/Snapshots/`.
+2. **Read each file.** You are the judge. Is this the output you want? Compare `old-style-net472.received.json` with the JSON in 9a.
+3. Accept them:
+
+   ```bash
+   cd tests/PortfolioLens.UnitTests/Snapshots
+   for f in *.received.json; do mv "$f" "${f%.received.json}.verified.json"; done
+   cd ../../..
+   dotnet test
+   ```
+
+   Expect: 0 warnings, 24 tests green.
+
 - **Trap:** a snapshot test that you accept without reading tests nothing. Step 2 is the test.
 - A `received` file in CI means "the output changed". The test fails there too. That is intended.
 
@@ -1299,11 +2483,47 @@ A small snapshot helper replaces Verify, which now needs a licence declaration w
 
 Why: the scanner needs a door. `System.CommandLine` gives the help text, the input checks, and a token for Ctrl+C.
 
+**Built and tested 2026-11-11** in the scratch copy: 0 warnings. `--help` works. A bad folder gives exit code 1. `--parallel 0` gives exit code 1. 2 apps with the same name give exit code 2. The fixtures scan gives 8 JSON files.
+
+**The files of this step**
+
+| Sub-step | File | New or change |
+|---|---|---|
+| 10a | `src/PortfolioLens.Cli/PortfolioLens.Cli.csproj` + `Directory.Packages.props` | change, by the `dotnet` command |
+| 10b | `src/PortfolioLens.Cli/Program.cs` | change: replace all of it |
+
+#### 10a. Add the package
+
 ```bash
 dotnet add src/PortfolioLens.Cli package System.CommandLine --version 3.0.0
 ```
 
-`src/PortfolioLens.Cli/Program.cs`:
+After the command, `Directory.Packages.props` has `<PackageVersion Include="System.CommandLine" Version="3.0.0" />`. The full `src/PortfolioLens.Cli/PortfolioLens.Cli.csproj`:
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\PortfolioLens.Core\PortfolioLens.Core.csproj" />
+    <ProjectReference Include="..\PortfolioLens.Extraction\PortfolioLens.Extraction.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+</Project>
+```
+
+#### 10b. `Program.cs` — the `scan` command
+
+Why: one command now. Later phases add more commands to the same `RootCommand`.
+
+Replace all of `src/PortfolioLens.Cli/Program.cs` with:
 
 ```csharp
 using System.CommandLine;
@@ -1345,22 +2565,39 @@ scan.SetAction(async (parseResult, ct) =>
 {
     var outFolder = parseResult.GetValue(outOption)!.FullName;
     var parallel = parseResult.GetValue(parallelOption);
+
+    // Collect all apps first. Two apps with the same name would write the same JSON file.
+    var appRoots = parseResult.GetValue(inputs)!
+        .SelectMany(input => Directory.EnumerateDirectories(input.FullName).Order(StringComparer.Ordinal))
+        .ToList();
+
+    var duplicates = appRoots
+        .GroupBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+        .Where(group => group.Count() > 1)
+        .ToList();
+    if (duplicates.Count > 0)
+    {
+        foreach (var group in duplicates)
+        {
+            Console.Error.WriteLine($"App name '{group.Key}' is in more than one input: {string.Join(", ", group)}");
+        }
+
+        return 2;
+    }
+
     var watch = Stopwatch.StartNew();
     int apps = 0, projects = 0, errors = 0;
 
     try
     {
-        foreach (var input in parseResult.GetValue(inputs)!)
+        foreach (var appRoot in appRoots)
         {
-            foreach (var appRoot in Directory.EnumerateDirectories(input.FullName).Order(StringComparer.Ordinal))
-            {
-                var facts = await AppScanner.ScanAsync(appRoot, parallel, ct);
-                await FactsJson.WriteAsync(facts, outFolder, ct);
-                apps++;
-                projects += facts.Projects.Count;
-                errors += facts.Errors.Count;
-                Console.WriteLine($"{facts.Name}: {facts.Projects.Count} projects, {facts.Errors.Count} errors");
-            }
+            var facts = await AppScanner.ScanAsync(appRoot, parallel, ct);
+            await FactsJson.WriteAsync(facts, outFolder, ct);
+            apps++;
+            projects += facts.Projects.Count;
+            errors += facts.Errors.Count;
+            Console.WriteLine($"{facts.Name}: {facts.Projects.Count} projects, {facts.Errors.Count} errors");
         }
     }
     catch (OperationCanceledException)
@@ -1383,32 +2620,41 @@ return await root.Parse(args).InvokeAsync();
 |---|---|
 | `Argument<DirectoryInfo[]>` + `OneOrMore` | You can give more than one input folder. `scan-targets.md` needs this for your own repos, because the walker does not follow symlinks |
 | `AcceptExistingOnly()` | A folder that does not exist gives `Directory does not exist: '/nope'.` and exit code 1. No code from you |
+| Collect all `appRoots` first | So we can check the names **before** we write any file |
+| `GroupBy(..., OrdinalIgnoreCase)` → exit code 2 | **Trap:** two input folders can have an app with the same name. The second JSON overwrites the first, with no message. `OrdinalIgnoreCase`, because the Mac file system sees `App.json` and `app.json` as one file |
 | `SetAction(async (parseResult, ct) => …)` | The library makes the `CancellationToken`. Ctrl+C cancels it. You do not need `Console.CancelKeyPress` |
 | `catch (OperationCanceledException)` → `130` | No stack trace on Ctrl+C. 130 is the usual exit code for "stopped by Ctrl+C" on Unix |
 | `.Order(StringComparer.Ordinal)` on the app folders | Same order of the console lines on each run |
 
-I ran this. `--help` works, a bad folder gives exit code 1, `--parallel 0` gives the error text, and Ctrl+C during a long walk stops in 1.0 second with `Stopped.` and exit code 130.
+- **Trap (the Mac):** `Process.GetCurrentProcess().PeakWorkingSet64` returns **0** on macOS. So the code prints `Environment.WorkingSet` (the memory at the end, not the peak). For the peak, use the tool of the OS:
 
-- **Trap (the Mac):** `Process.GetCurrentProcess().PeakWorkingSet64` returns **0** on macOS. I tested it. So the code above prints `Environment.WorkingSet` (the memory at the end, not the peak). For the peak, use the tool of the OS:
+  ```bash
+  /usr/bin/time -l dotnet run -c Release --project src/PortfolioLens.Cli -- scan scan-input
+  ```
 
-```bash
-/usr/bin/time -l dotnet run -c Release --project src/PortfolioLens.Cli -- scan scan-input
-```
-
-  Look for `maximum resident set size`. The number is in bytes. My run on the 6 repos: 76349440 bytes = 73 MB.
-- **Trap:** two input folders can have an app with the same name. The second JSON then overwrites the first, with no message. I saw it in a test. Add a check, you write it: collect the app names first, and stop with a clear error if a name is there 2 times.
+  Look for `maximum resident set size`. The number is in bytes. The first run on the 6 repos: 76349440 bytes = 73 MB.
 - **Trap:** `dotnet run` needs `--` before the arguments of your program. Without it, `dotnet` reads `--out` as its own option.
+- Note: the time prints with the decimal sign of your machine (`0,30 s` on a machine with a comma). This is console text only, not the JSON. So it is OK.
 
-Try it:
+#### 10c. Try it, commit
 
 ```bash
-dotnet run --project src/PortfolioLens.Cli -- --help
+dotnet build
+dotnet run --project src/PortfolioLens.Cli -- scan --help
+dotnet run --project src/PortfolioLens.Cli -- scan /nope; echo "exit=$?"
+dotnet run --project src/PortfolioLens.Cli -- scan fixtures --parallel 0; echo "exit=$?"
 dotnet run --project src/PortfolioLens.Cli -- scan fixtures --out scan-output
 dotnet run -c Release --project src/PortfolioLens.Cli -- scan scan-input
 git status
 ```
 
-`git status` must not show `scan-output/`.
+Expect:
+
+- `/nope` → `Directory does not exist: '/nope'.`, `exit=1`.
+- `--parallel 0` → `--parallel must be 1 or more.`, `exit=1`.
+- `fixtures` → 8 lines, then `apps: 8, projects: 8, errors: 2`.
+- `scan-input` → `apps: 6, projects: 119, errors: 26`.
+- `git status` must not show `scan-output/`.
 
 Commit message:
 
@@ -1416,27 +2662,45 @@ Commit message:
 Add the scan command to the CLI
 
 System.CommandLine gives help text, input checks and a cancellation token for Ctrl+C.
-The command takes several input folders, because the walker does not follow symlinks.
+The command takes several input folders and stops when 2 apps have the same name.
 ```
 
 ### 11. Real repos, numbers, ADRs
 
 Why: fixtures prove the rules. Real repos prove that the rules are enough. Numbers that you measured are worth more than numbers that you read.
 
-**Compare with my run.** My copy gave this on your 6 repos (2026-11-10). Your numbers must be the same, or you must know why not:
+#### 11a. Compare with the expected numbers
+
+The scratch copy of steps 5–10 gave this on your 6 repos (2026-11-11). It is the same as the first test copy (2026-11-10). Your numbers must be the same, or you must know why not:
 
 | App | Solutions | Projects | Frameworks | Packages by source | Errors |
 |---|---|---|---|---|---|
-| ContosoUniversityDotNetCore | 1 | 2 | `netcoreapp2.0` | 18 PackageReference | 0 |
-| eShop | 3 | 28 | `net10.0` + 3 mobile ones | 95 Central, 19 PackageReference | 0 |
+| ContosoUniversityDotNetCore | 1 | 2 | `netcoreapp2.0` ×2 | 18 PackageReference | 0 |
+| eShop | 3 | 28 | `net10.0` ×27, `net10.0-android` ×2, `net10.0-ios` ×2, `net10.0-maccatalyst` ×2 | 95 Central, 19 PackageReference | 0 |
 | eShopModernizing | 7 | 11 | `net461` ×4, `net472` ×4, `net47`, `net471`, `net6.0-windows` | 384 PackagesConfig, 71 PackageReference | 0 |
-| eShopOnWeb | 1 | 13 | `net10.0` | 110 Central | 0 |
+| eShopOnWeb | 1 | 13 | `net10.0` ×13 | 110 Central | 0 |
 | nopCommerce-3.90 | 1 | 31 | `net451` ×31 | 338 PackagesConfig | 0 |
 | nopCommerce-4.90 | 2 | 34 | `net9.0` ×34 | 48 PackageReference | 26 Unresolved (`$(SolutionDir)`) |
 
-Total: 6 apps, 119 projects, 26 errors, 0.15–0.18 seconds.
+Total: 6 apps, 119 projects, 26 errors.
 
-**Byte-identical check:**
+This script prints the same columns from your output, so you do not count by hand:
+
+```bash
+dotnet run -c Release --project src/PortfolioLens.Cli -- scan scan-input --out scan-output
+cd scan-output && python3 - <<'EOF'
+import json, glob, collections
+for f in sorted(glob.glob('*.json')):
+    d = json.load(open(f))
+    frameworks = collections.Counter(t for p in d['projects'] for t in p['targetFrameworks'])
+    sources = collections.Counter(pk['source'] for p in d['projects'] for pk in p['packages'])
+    kinds = collections.Counter(e['kind'] for e in d['errors'])
+    print(d['name'], len(d['solutions']), len(d['projects']), dict(frameworks), dict(sources), dict(kinds))
+EOF
+cd ..
+```
+
+#### 11b. Byte-identical check
 
 ```bash
 dotnet run -c Release --project src/PortfolioLens.Cli -- scan scan-input --out scan-output/a --parallel 1
@@ -1444,31 +2708,131 @@ dotnet run -c Release --project src/PortfolioLens.Cli -- scan scan-input --out s
 diff -r scan-output/a scan-output/b && echo IDENTICAL
 ```
 
-**The big one.** Clone it now. It is a big download.
+Expect: `IDENTICAL`. (Scratch run, 2026-11-11: `IDENTICAL`.)
+
+#### 11c. The big one: `dotnet/roslyn`
+
+Clone it now. It is a big download.
 
 ```bash
 git clone --depth 1 https://github.com/dotnet/roslyn scan-input/roslyn
 ```
 
-Then measure 3 values of `--parallel` (1, 4, and your core count). Run each one 3 times. Take the middle value. Write the time and the `maximum resident set size`.
+Then measure 3 values of `--parallel`: 1, 4, and your core count. Run each one 3 times. Take the middle value. Write down the time and the `maximum resident set size`.
 
 ```bash
 dotnet build -c Release
 /usr/bin/time -l dotnet src/PortfolioLens.Cli/bin/Release/net10.0/PortfolioLens.Cli.dll scan scan-input --parallel 1
+/usr/bin/time -l dotnet src/PortfolioLens.Cli/bin/Release/net10.0/PortfolioLens.Cli.dll scan scan-input --parallel 4
+/usr/bin/time -l dotnet src/PortfolioLens.Cli/bin/Release/net10.0/PortfolioLens.Cli.dll scan scan-input --parallel "$(sysctl -n hw.ncpu)"
 ```
 
-- What I saw on the 6 small repos: 0.17 s, 0.15 s, 0.15 s for `--parallel` 1, 4, 16. No real difference. 119 small files are too few. Most of the time is the start of the program. Do not be surprised. Roslyn has much more files, and the walk is the big part there.
+- What I saw on the 6 small repos: 0.17 s, 0.15 s, 0.15 s for `--parallel` 1, 4, 16. No real difference. 119 small files are too few. Most of the time is the start of the program. Do not be surprised. Roslyn has many more files, and the walk is the big part there.
 - Expect many `Unresolved` errors on roslyn. It defines its properties in imported files that we do not read. That is correct behavior.
 - **Trap:** run the built `.dll`, not `dotnet run`, when you measure. `dotnet run` adds the build check to the time.
 - **Trap:** the first run after a clone is slower. The OS has not cached the files yet. That is why you run 3 times.
+- ⚠ I did not clone or scan roslyn. I have no numbers for it.
 
-**Ctrl+C check:** start the roslyn scan with `--parallel 1` and press Ctrl+C at once. You must see `Stopped.`, no stack trace, in under 2 seconds. Each `.json` in the output folder must be valid. No `.tmp` file with half content may have the name of a `.json` file.
+#### 11d. Ctrl+C check
 
-**ADRs.** Write these in your own words, same shape as 0001:
+```bash
+dotnet src/PortfolioLens.Cli/bin/Release/net10.0/PortfolioLens.Cli.dll scan scan-input --parallel 1 --out scan-output/c
+```
 
-- `docs/adr/0004-read-project-files-as-plain-xml.md` — why not MSBuild evaluation. List the limits: conditions are not evaluated; only `Directory.Build.props` and `Directory.Packages.props` are read, no other imports; `TargetFrameworkProfile` is ignored; a folder with the name `packages` is skipped; no `Directory.Build.targets`.
-- `docs/adr/0005-one-repo-is-one-app.md` — the rule, and that we can split by solution later.
-- `docs/adr/0006-own-snapshot-helper-not-verify.md` — the licence declaration with an end date, and what we lose (the diff tool).
+Press Ctrl+C at once. Then:
+
+```bash
+echo "exit=$?"
+ls scan-output/c
+for f in scan-output/c/*.json; do python3 -m json.tool "$f" > /dev/null && echo "ok $f"; done
+```
+
+Expect: `Stopped.`, no stack trace, in under 2 seconds. `exit=130`. Each `.json` is valid. A `.tmp` file can be there; that is the file that was not finished. It never has the `.json` name.
+
+#### 11e. The ADRs
+
+Why: 3 decisions of this phase get a "why?" question. Same shape as 0001.
+
+New file `docs/adr/0004-read-project-files-as-plain-xml.md`:
+
+```markdown
+# 0004 — Read project files as plain XML
+
+Date: 2026-11-11
+Status: Accepted
+
+## Context
+The scanner must read `.csproj`, `.vbproj` and `.fsproj` files of old and new .NET projects.
+MSBuild evaluation gives exact values, but it is slow, it needs the build targets of each
+project type installed, and it fails on a Mac for old Windows-only projects.
+
+## Decision
+Read the files with `XDocument`. Read only `Directory.Build.props` and
+`Directory.Packages.props` next to or above each project, and stop at the app root.
+A value that we cannot resolve stays as raw text and becomes a `ScanError` of kind `Unresolved`.
+
+## Consequences
+Fast, no build, works on each OS. Known limits:
+- Conditions are stored as text. They are not evaluated.
+- No other imports are read (`Directory.Build.targets`, custom `.props`, SDK files).
+- `TargetFrameworkProfile` (for example `Client`) is ignored.
+- A folder with the name `packages` is skipped by the walker, also when it holds real projects.
+- `$(SolutionDir)` and other build-time properties stay unresolved.
+```
+
+New file `docs/adr/0005-one-repo-is-one-app.md`:
+
+```markdown
+# 0005 — One repo folder is one app
+
+Date: 2026-11-11
+Status: Accepted
+
+## Context
+A repo can have many solution files, and a project can be in more than one solution.
+We need one simple rule for "what is one app" in the output.
+
+## Decision
+Each sub-folder of an input folder is one app, and it gives one JSON file.
+The solution files of the app are a list of paths inside it. We do not parse them.
+
+## Consequences
+Each project is in the output one time. The rule is easy to explain.
+A repo with many products in it is one app. We can split an app by solution later,
+from the stored paths, with no new scan.
+Two input folders with an app of the same name stop the CLI with exit code 2.
+```
+
+New file `docs/adr/0006-own-snapshot-helper-not-verify.md`:
+
+```markdown
+# 0006 — Own snapshot helper, not Verify
+
+Date: 2026-11-11
+Status: Accepted
+
+## Context
+The JSON output needs snapshot tests: the full output is stored in git and compared on each run.
+Verify is the usual library for this. Version 33 stops the build until the project
+declares a licence status with an end date.
+
+## Decision
+Use a small own helper (`tests/PortfolioLens.UnitTests/Snapshot.cs`, about 25 lines).
+It writes `<name>.received.json` when the output is new or different, and the test fails.
+The owner reads the file and renames it to `<name>.verified.json` to accept it.
+
+## Consequences
+The build of a public repo never stops because a date passed. No extra package.
+We lose the Verify extras: no diff tool opens, no scrubbers, no auto-accept. A rename by hand is the accept.
+```
+
+#### 11f. Commit
+
+```bash
+git status
+```
+
+`git status` must show only the 3 ADRs (and no `scan-output/`).
 
 Commit message:
 
@@ -1478,8 +2842,6 @@ Record the Phase 1 decisions and measurements
 ADRs 0004 to 0006 explain plain XML with its limits, one repo as one app, and the snapshot helper.
 The numbers come from scans of the cloned repos and of dotnet/roslyn.
 ```
-
-Put your measured numbers in the pull request text, not in a file in `me/plan/`.
 
 ### 12. Pull request
 
