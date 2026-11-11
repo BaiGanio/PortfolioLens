@@ -8,4 +8,8 @@
     <PackageReference Include="NuGet.Frameworks" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="PortfolioLens.UnitTests" />
+  </ItemGroup>
+
 </Project>
